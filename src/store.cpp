@@ -58,7 +58,8 @@ Json default_presence() {
 Json empty_state() {
     return {{"schema", 1}, {"requests", Json::array()}, {"jobs", Json::array()},
             {"tasks", Json::array()}, {"notes", Json::array()}, {"trash", Json::array()},
-            {"inbox", Json::array()}, {"preferences", default_preferences()}, {"presence", default_presence()}, {"lease", nullptr}};
+            {"inbox", Json::array()}, {"agents", Json::array()},
+            {"preferences", default_preferences()}, {"presence", default_presence()}, {"lease", nullptr}};
 }
 
 bool has_text(const std::string& value) {
@@ -138,6 +139,22 @@ std::string text_field(const Json& object, const char* field, std::size_t limit,
     // the pipe JSON parser already rejects it.
     (void)Json(value).dump();
     return value;
+}
+
+// A title or status is shown on one line of the agents list.
+std::string one_line(const Json& object, const char* field) {
+    auto value = plain_text(text_field(object, field, 160, true));
+    for (auto& c : value) if (c == '\n' || c == '\t') c = ' ';
+    const auto first = value.find_first_not_of(' ');
+    if (first == std::string::npos) throw std::runtime_error(std::string("empty_field: ") + field);
+    return value.substr(first, value.find_last_not_of(' ') - first + 1);
+}
+
+std::string report_path(const Json& object) {
+    const auto report = text_field(object, "report", 32768);
+    if (std::any_of(report.begin(), report.end(), [](unsigned char c) { return c < 0x20 || c == 0x7F; }))
+        throw std::runtime_error("invalid_report_path");
+    return report;
 }
 
 Json note_tags(const Json& object) {
@@ -620,9 +637,9 @@ void validate_state(const Json& state) {
     if (state.contains("preferences")) validate_preferences(state["preferences"]);
     if (state.contains("presence")) validate_presence(state["presence"]);
     std::set<std::string> ids;
-    for (const auto* collection : {"requests", "jobs", "tasks", "notes", "trash", "inbox"}) {
-        if ((std::string_view(collection) == "trash" || std::string_view(collection) == "inbox") &&
-            !state.contains(collection)) continue;
+    for (const auto* collection : {"requests", "jobs", "tasks", "notes", "trash", "inbox", "agents"}) {
+        if ((std::string_view(collection) == "trash" || std::string_view(collection) == "inbox" ||
+             std::string_view(collection) == "agents") && !state.contains(collection)) continue;
         if (!state.contains(collection) || !state[collection].is_array() ||
             state[collection].size() > max_records)
             throw std::runtime_error(std::string("invalid_collection: ") + collection);
@@ -653,6 +670,16 @@ void validate_state(const Json& state) {
                     throw std::runtime_error("inconsistent_pending_request");
                 if (record["kind"] == "question" && (record["lease_until"] != 0 || record["status"] == "released"))
                     throw std::runtime_error("inconsistent_question_lease");
+            } else if (category == "agents") {
+                require_fields(record, {"chat", "title", "status", "status_text", "report", "started_at", "updated_at"});
+                text_field(record, "chat", 64, true);
+                text_field(record, "title", 160, true);
+                text_field(record, "status_text", 160);
+                text_field(record, "report", 32768);
+                if (!is_one_of(text_field(record, "status", 16, true), {"working", "done"}))
+                    throw std::runtime_error("invalid_agent_status");
+                integer_field(record, "started_at", 0, INT64_MAX, 0, true);
+                integer_field(record, "updated_at", 0, INT64_MAX, 0, true);
             } else if (category == "inbox") {
                 require_fields(record, {"chat", "status", "summary", "report", "finished_at", "updated_at"});
                 text_field(record, "chat", 64, true);
@@ -864,6 +891,8 @@ void Store::load() {
     bool dirty = !exists;
     if (!loaded.contains("trash")) { loaded["trash"] = Json::array(); dirty = true; }
     if (!loaded.contains("inbox")) { loaded["inbox"] = Json::array(); dirty = true; }
+    // Added in memory only: opening a 0.7.0 state must not rewrite the file.
+    if (!loaded.contains("agents")) loaded["agents"] = Json::array();
     if (!loaded.contains("preferences")) { loaded["preferences"] = default_preferences(); dirty = true; }
     if (!loaded.contains("presence")) { loaded["presence"] = default_presence(); dirty = true; }
     const auto defaults = default_preferences();
@@ -1031,7 +1060,7 @@ Json Store::handle(const Json& command, bool trusted_ui) {
                 const auto now = now_ms();
                 if (op == "snapshot") {
                     Json snapshot = Json::object();
-                    for (const auto* field : {"schema", "requests", "jobs", "tasks", "inbox", "lease", "preferences", "presence"})
+                    for (const auto* field : {"schema", "requests", "jobs", "tasks", "inbox", "agents", "lease", "preferences", "presence"})
                         snapshot[field] = state_[field];
                     snapshot["notes"] = Json::array();
                     for (const auto& note : state_["notes"])
@@ -1117,9 +1146,16 @@ Json Store::handle(const Json& command, bool trusted_ui) {
                     const auto chat = text_field(command, "chat", 64, true);
                     const auto summary = plain_text(text_field(command, "summary", 16000, true));
                     if (!has_text(summary)) throw std::runtime_error("empty_field: summary");
-                    const auto report = text_field(command, "report", 32768);
-                    if (std::any_of(report.begin(), report.end(), [](unsigned char c) { return c < 0x20 || c == 0x7F; }))
-                        throw std::runtime_error("invalid_report_path");
+                    auto report = report_path(command);
+                    // The check-in may already have named the report.
+                    auto& agents = state_["agents"];
+                    const auto agent = std::find_if(agents.begin(), agents.end(),
+                        [&](const Json& item) { return item["chat"] == chat; });
+                    if (agent != agents.end()) {
+                        if (report.empty()) report = agent->value("report", "");
+                        (*agent)["status"] = "done";
+                        (*agent)["finished_at"] = now;
+                    }
                     Json completed = Json::array();
                     auto& tasks = state_["tasks"];
                     if (command.contains("task")) {
@@ -1160,6 +1196,38 @@ Json Store::handle(const Json& command, bool trusted_ui) {
                     result = {{"ok", true}, {"done", record}};
                     notification = event("done", &record, summary);
                     notification["title"] = chat;
+                    dirty = true;
+                } else if (op == "agent.start" || op == "agent.update") {
+                    // One record per chat. Starting again replaces the check-in; a
+                    // status from a job that never checked in also shows it working.
+                    const bool start = op == "agent.start";
+                    const auto chat = text_field(command, "chat", 64, true);
+                    const auto line = one_line(command, start ? "title" : "status");
+                    const auto report = start ? report_path(command) : std::string();
+                    auto& agents = state_["agents"];
+                    auto agent = std::find_if(agents.begin(), agents.end(),
+                        [&](const Json& item) { return item["chat"] == chat; });
+                    if (agent == agents.end()) {
+                        room_for_record(agents);
+                        agents.push_back({{"id", make_id()}, {"chat", chat}, {"title", line}, {"status_text", ""},
+                                          {"report", report}, {"created_at", now}, {"started_at", now}});
+                        agent = std::prev(agents.end());
+                    } else if (start) {
+                        (*agent)["title"] = line;
+                        (*agent)["status_text"] = "";
+                        (*agent)["report"] = report;
+                        (*agent)["started_at"] = now;
+                    } else {
+                        (*agent)["status_text"] = line;
+                    }
+                    (*agent)["status"] = "working";
+                    (*agent)["updated_at"] = now;
+                    agent->erase("finished_at");
+                    agent->erase("archived");
+                    Json record = *agent;
+                    result = {{"ok", true}, {"agent", record}};
+                    notification = event("updated", &record);
+                    notification["operation"] = op;
                     dirty = true;
                 } else if (op == "job.result") {
                     result = {{"ok", true}, {"job", find_record(state_["jobs"], id_field(command))}};
@@ -1441,8 +1509,9 @@ Json Store::handle(const Json& command, bool trusted_ui) {
                     dirty = true;
                 } else if (op == "item.dismiss") {
                     const auto kind = text_field(command, "kind", 16, true);
-                    if (!is_one_of(kind, {"request", "job", "inbox"})) throw std::runtime_error("invalid_item_kind");
-                    auto& record = find_record(state_[kind == "request" ? "requests" : kind == "job" ? "jobs" : "inbox"],
+                    if (!is_one_of(kind, {"request", "job", "inbox", "agent"})) throw std::runtime_error("invalid_item_kind");
+                    auto& record = find_record(state_[kind == "request" ? "requests" : kind == "job" ? "jobs" :
+                                                      kind == "agent" ? "agents" : "inbox"],
                                                id_field(command));
                     if (record["status"] == "pending" || record["status"] == "running")
                         throw std::runtime_error("item_still_active");
@@ -1462,7 +1531,7 @@ Json Store::handle(const Json& command, bool trusted_ui) {
                 throw;
             }
         }
-        if (result.contains("request")) result["presence"] = state_["presence"];
+        if (result.contains("request") || result.contains("agent")) result["presence"] = state_["presence"];
     } catch (const std::exception& error) {
         result = {{"ok", false}, {"error", error.what()}};
     } catch (...) {

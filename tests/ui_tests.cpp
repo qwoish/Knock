@@ -1,4 +1,5 @@
 #include "knock/platform.hpp"
+#include "test_isolation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -18,7 +19,6 @@ using knock::Json;
 using namespace std::chrono_literals;
 
 namespace {
-constexpr wchar_t tray_class[] = L"Knock.Tray.v1";
 
 void require(bool value, const std::string& message) {
     if (!value) throw std::runtime_error(message);
@@ -132,7 +132,7 @@ bool lists(const std::wstring& text, const std::wstring& title) {
 void open_note(HWND root, const std::wstring& title) {
     set_text(edit(root, 30), L"/find-note " + title);
     enter(edit(root, 30));
-    eventually([&] { return edit(root, 51) && IsWindowVisible(edit(root, 51)); }, "find page opens");
+    eventually([&] { return edit(root, 51) && knock::window_shown(edit(root, 51)); }, "find page opens");
     enter(edit(root, 51));
     eventually([&] { return edit(root, 37) != nullptr; }, "note opens from /find-note");
 }
@@ -231,32 +231,17 @@ HWND focus_of(HWND root) { return gui_thread_info(root).hwndFocus; }
 
 void choose_context_item(HWND root, HWND source, std::initializer_list<UINT> keys) {
     require(source == root || IsChild(root, source), "Context menu source is outside the test app");
-    const auto ui_thread = GetWindowThreadProcessId(root, nullptr);
-    HWND menu_owner = nullptr;
     require(PostMessageW(source, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(source), -1) != 0,
             "Could not open the chosen control's context menu");
-    try {
-        eventually([&] {
-            const auto info = gui_thread_info(root);
-            menu_owner = info.hwndMenuOwner;
-            return (info.flags & GUI_INMENUMODE) && menu_owner &&
-                   GetWindowThreadProcessId(menu_owner, nullptr) == ui_thread;
-        }, "native context menu opens");
-        // TrackPopupMenu has its own modal loop. Post only to this app's
-        // menu owner so the real menu processes navigation and selection.
-        for (UINT key : keys)
-            require(PostMessageW(menu_owner, WM_KEYDOWN, key, 1) != 0, "Could not navigate the test popup menu");
-        eventually([&] { return !(gui_thread_info(root).flags & GUI_INMENUMODE); }, "native context menu closes");
-        message(root, WM_NULL);
-    } catch (...) {
-        PostMessageW(root, WM_CANCELMODE, 0, 0);
-        throw;
-    }
+    eventually([&] { return test_menu_open(root); }, "context menu opens");
+    choose_test_menu(root, keys);
+    eventually([&] { return !test_menu_open(root); }, "context menu closes");
+    message(root, WM_NULL);
 }
 
 void open_settings(HWND root, HWND source) {
     choose_context_item(root, source, {VK_HOME, VK_RETURN});
-    eventually([&] { return IsWindowVisible(edit(root, 41)) && IsWindowVisible(edit(root, 42)); },
+    eventually([&] { return knock::window_shown(edit(root, 41)) && knock::window_shown(edit(root, 42)); },
                "Settings opens from the context menu");
 }
 
@@ -278,7 +263,7 @@ HWND shortcut_dialog(HWND root) {
         GetWindowThreadProcessId(root, &expected);
         require(owner == expected && GetWindow(dialog, GW_OWNER) == root,
                 "Refusing to control another app's shortcut dialog");
-        return IsWindowVisible(dialog) && buttons(dialog, L"CANCEL").size() == 1;
+        return knock::window_shown(dialog) && buttons(dialog, L"CANCEL").size() == 1;
     }, "Settings CHANGE opens the shortcut dialog");
     require(!IsWindowEnabled(root), "Shortcut dialog did not disable its owner");
     return dialog;
@@ -322,6 +307,7 @@ struct Application {
         directory = std::filesystem::path(temporary) / (L"knock-ui-tests-" + knock::widen(knock::make_id()));
         require(SetEnvironmentVariableW(L"KNOCK_DATA_DIR", directory.c_str()) != 0,
                 "Cannot isolate test data directory");
+        SetEnvironmentVariableW(L"KNOCK_TEST_MENU", L"1");
     }
 
     ~Application() { try { close(); } catch (...) {} }
@@ -343,13 +329,13 @@ struct Application {
         process = created.hProcess;
         process_id = created.dwProcessId;
         eventually([&] {
-            HWND candidate = FindWindowW(tray_class, nullptr);
+            HWND candidate = FindWindowW(knock::tray_window_class().c_str(), nullptr);
             if (!candidate) return false;
             DWORD owner = 0;
             GetWindowThreadProcessId(candidate, &owner);
             require(owner == process_id, "A different Knock process appeared; refusing to control it");
             root = candidate;
-            return IsWindowVisible(root) && buttons(root, L"AT PC").size() == 1;
+            return knock::window_shown(root) && buttons(root, L"AT PC").size() == 1;
         }, "tray window startup");
         eventually([&] {
             try { return knock::send_command({{"op", "snapshot"}}, false).value("ok", false); }
@@ -397,10 +383,7 @@ void passed(const char* label) { std::cout << "PASS " << label << '\n' << std::f
 } // namespace
 
 int main() {
-    if (FindWindowW(tray_class, nullptr)) {
-        std::cout << "SKIP: close KnockTray before running native GUI integration tests.\n";
-        return 77;
-    }
+    if (skip_outside_isolation()) return 77;
     try {
         Application app;
         app.launch();
@@ -414,34 +397,34 @@ int main() {
         passed("tray popup uses toolwindow style with no taskbar or caption");
         const auto original_window = app.root;
         message(app.root, WM_CLOSE);
-        eventually([&] { return !IsWindowVisible(app.root); }, "close hides popup");
+        eventually([&] { return !knock::window_shown(app.root); }, "close hides popup");
         require(IsWindow(app.root) && WaitForSingleObject(app.process, 0) == WAIT_TIMEOUT,
                 "Closing the popup terminated the tray process");
         message(app.root, WM_APP + 20); // The app's existing reopen message.
-        eventually([&] { return IsWindowVisible(app.root); }, "reopen hidden popup");
-        require(FindWindowW(tray_class, nullptr) == original_window, "Reopening replaced the tray window");
+        eventually([&] { return knock::window_shown(app.root); }, "reopen hidden popup");
+        require(FindWindowW(knock::tray_window_class().c_str(), nullptr) == original_window, "Reopening replaced the tray window");
         passed("close hides the popup and reopen retains the running tray and HWND");
         // The default shortcut is registered under this module ID. Deliver its
         // normal window message directly; do not inject a desktop key chord.
         message(app.root, WM_HOTKEY, 0x7FFF, MAKELPARAM(MOD_CONTROL | MOD_ALT, 'K'));
-        require(IsWindowVisible(app.root), "An unrelated hotkey message toggled the popup");
+        require(knock::window_shown(app.root), "An unrelated hotkey message toggled the popup");
         message(app.root, WM_HOTKEY, 0x4B10, MAKELPARAM(MOD_CONTROL | MOD_ALT, 'K'));
-        eventually([&] { return !IsWindowVisible(app.root); }, "registered shortcut hides popup");
+        eventually([&] { return !knock::window_shown(app.root); }, "registered shortcut hides popup");
         message(app.root, WM_HOTKEY, 0x4B10, MAKELPARAM(MOD_CONTROL | MOD_ALT, 'K'));
-        eventually([&] { return IsWindowVisible(app.root); }, "registered shortcut opens popup");
-        require(FindWindowW(tray_class, nullptr) == original_window, "Shortcut toggle replaced the tray window");
+        eventually([&] { return knock::window_shown(app.root); }, "registered shortcut opens popup");
+        require(FindWindowW(knock::tray_window_class().c_str(), nullptr) == original_window, "Shortcut toggle replaced the tray window");
         message(app.root, WM_ACTIVATE, WA_INACTIVE, 0);
-        require(IsWindowVisible(app.root), "Hotkey-opened popup hid when another window took focus");
+        require(knock::window_shown(app.root), "Hotkey-opened popup hid when another window took focus");
         require(GetWindowLongPtrW(app.root, GWL_EXSTYLE) & WS_EX_TOPMOST,
                 "Hotkey-opened popup lost its topmost window style");
         message(app.root, WM_HOTKEY, 0x4B10, MAKELPARAM(MOD_CONTROL | MOD_ALT, 'K'));
-        eventually([&] { return !IsWindowVisible(app.root); }, "shortcut still dismisses pinned popup");
+        eventually([&] { return !knock::window_shown(app.root); }, "shortcut still dismisses pinned popup");
         message(app.root, WM_APP + 20);
-        eventually([&] { return IsWindowVisible(app.root); }, "ordinary reopen after pinned popup");
+        eventually([&] { return knock::window_shown(app.root); }, "ordinary reopen after pinned popup");
         message(app.root, WM_ACTIVATE, WA_INACTIVE, 0);
-        eventually([&] { return !IsWindowVisible(app.root); }, "ordinary popup still dismisses on focus loss");
+        eventually([&] { return !knock::window_shown(app.root); }, "ordinary popup still dismisses on focus loss");
         message(app.root, WM_HOTKEY, 0x4B10, MAKELPARAM(MOD_CONTROL | MOD_ALT, 'K'));
-        eventually([&] { return IsWindowVisible(app.root); }, "restore pinned popup for remaining checks");
+        eventually([&] { return knock::window_shown(app.root); }, "restore pinned popup for remaining checks");
         passed("shortcut toggles a topmost popup that stays open on focus loss; ordinary opens stay transient");
 
         const auto content = FindWindowExW(app.root, nullptr, L"Knock.Content.v1", nullptr);
@@ -531,9 +514,9 @@ int main() {
         const auto expected_preferences = preferences();
         back_from_settings(app.root);
         choose_context_item(app.root, app.root, {VK_HOME, VK_DOWN, VK_RETURN});
-        eventually([&] { return !IsWindowVisible(app.root); }, "context menu Hide Knock hides popup");
+        eventually([&] { return !knock::window_shown(app.root); }, "context menu Hide Knock hides popup");
         message(app.root, WM_APP + 20);
-        eventually([&] { return IsWindowVisible(app.root); }, "reopen after Hide Knock");
+        eventually([&] { return knock::window_shown(app.root); }, "reopen after Hide Knock");
         passed("Settings CHANGE opens shortcut controls; Cancel, Save, size Reset, and context Hide work");
 
         auto denied = create_request("GUI-NO");
@@ -595,7 +578,7 @@ int main() {
         click(button(app.root, L"COPY"));
         require(clipboard_text() == knock::widen(continuation), "Copy did not preserve the exact continuation text");
         send({{"op", "item.dismiss"}, {"kind", "job"}, {"id", notice["id"]}});
-        eventually([&] { return buttons(app.root, L"COPY").empty(); }, "copied notification archived");
+        eventually([&] { return buttons(app.root, L"COPY").empty() && buttons(app.root, L"COPIED").empty(); }, "copied notification archived");
         passed("actual Copy button publishes the exact Unicode continuation to the clipboard");
 
         eventually([&] { return edit(app.root, 30) != nullptr; }, "notes search");
@@ -651,11 +634,11 @@ int main() {
         require(LOWORD(selection) == 0 && HIWORD(selection) == external_draft.size(),
                 "The edit context menu lost its native Select all action");
         open_settings(app.root, composer);
-        require(edit(app.root, 37) == composer && !IsWindowVisible(composer) &&
+        require(edit(app.root, 37) == composer && !knock::window_shown(composer) &&
                 window_text(composer) == external_draft && saved_note(working_id)["messages"] == working_messages,
                 "Settings replaced the composer or sent its unsent draft");
         back_from_settings(app.root);
-        require(edit(app.root, 37) == composer && IsWindowVisible(composer) &&
+        require(edit(app.root, 37) == composer && knock::window_shown(composer) &&
                 window_text(composer) == external_draft && focus_of(app.root) == composer,
                 "Back from Settings lost the composer, draft, or focus");
         passed("edit context menus retain Select all and Settings preserves the unsent conversation");
@@ -676,7 +659,7 @@ int main() {
         require(edit(app.root, 32) == metadata_body && window_text(metadata_body) == description,
                 "External tag edit replaced the unsaved description");
         click(button(app.root, L"EDIT"));
-        eventually([&] { return !edit(app.root, 31) && !edit(app.root, 32) && IsWindowVisible(edit(app.root, 37)); },
+        eventually([&] { return !edit(app.root, 31) && !edit(app.root, 32) && knock::window_shown(edit(app.root, 37)); },
                    "return from description to conversation");
         require(saved_note(working_id)["body"] == knock::narrow(description) &&
                 saved_note(working_id)["tags"] == Json::array({"Reference"}) &&
@@ -692,9 +675,9 @@ int main() {
         require(window_text(composer) == external_draft && saved_note(working_id)["messages"] == working_messages,
                 "Leaving the note lost a draft or implicitly sent it");
         message(app.root, WM_CLOSE);
-        eventually([&] { return !IsWindowVisible(app.root); }, "hide with a conversation draft");
+        eventually([&] { return !knock::window_shown(app.root); }, "hide with a conversation draft");
         message(app.root, WM_APP + 20);
-        eventually([&] { return IsWindowVisible(app.root); }, "reopen with a conversation draft");
+        eventually([&] { return knock::window_shown(app.root); }, "reopen with a conversation draft");
         require(edit(app.root, 37) == composer && window_text(composer) == external_draft &&
                 saved_note(working_id)["messages"] == working_messages,
                 "Hide/reopen changed the unsent draft or history");
@@ -724,18 +707,18 @@ int main() {
                 saved_note(working_id)["body"] == knock::narrow(description),
                 "Background save committed incomplete metadata with an empty title");
         message(app.root, WM_CLOSE);
-        eventually([&] { return !IsWindowVisible(app.root); }, "hide with an incomplete note title");
+        eventually([&] { return !knock::window_shown(app.root); }, "hide with an incomplete note title");
         message(app.root, WM_APP + 20);
-        eventually([&] { return IsWindowVisible(app.root); }, "reopen with an incomplete note title");
+        eventually([&] { return knock::window_shown(app.root); }, "reopen with an incomplete note title");
         require(edit(app.root, 31) == empty_title_edit && window_text(empty_title_edit).empty() &&
                 edit(app.root, 32) == pending_body_edit && window_text(pending_body_edit) == pending_description,
                 "Hide/reopen discarded or repopulated incomplete note metadata");
         click(button(app.root, L"SAVE"));
-        require(edit(app.root, 31) == empty_title_edit && IsWindowVisible(empty_title_edit) &&
+        require(edit(app.root, 31) == empty_title_edit && knock::window_shown(empty_title_edit) &&
                 window_text(empty_title_edit).empty() && focus_of(app.root) == empty_title_edit,
                 "Explicit Save silently accepted or restored an empty title");
         open_settings(app.root, empty_title_edit);
-        require(!IsWindowVisible(empty_title_edit) && !IsWindowVisible(pending_body_edit) &&
+        require(!knock::window_shown(empty_title_edit) && !knock::window_shown(pending_body_edit) &&
                 edit(app.root, 31) == empty_title_edit && edit(app.root, 32) == pending_body_edit,
                 "Settings destroyed incomplete note metadata instead of keeping its editors");
         back_from_settings(app.root);
@@ -750,7 +733,7 @@ int main() {
                 "Navigation discarded unfinished metadata after validation failed");
         set_text(empty_title_edit, L"Working note renamed");
         click(button(app.root, L"SAVE"));
-        eventually([&] { return !edit(app.root, 31) && IsWindowVisible(edit(app.root, 37)); },
+        eventually([&] { return !edit(app.root, 31) && knock::window_shown(edit(app.root, 37)); },
                    "save the replacement title and return to the conversation");
         const auto renamed_note = saved_note(working_id);
         require(renamed_note["title"] == "Working note renamed" &&
@@ -800,7 +783,7 @@ int main() {
         const auto expected_tags = Json::array({"Personal", "Ideas", knock::narrow(custom_tag)});
         eventually([&] { return saved_note(persistent_id)["tags"] == expected_tags; }, "new Unicode tag saved");
         click(button(app.root, L"DONE"));
-        eventually([&] { return !edit(app.root, 36) && IsWindowVisible(edit(app.root, 37)); }, "tag selector closed");
+        eventually([&] { return !edit(app.root, 36) && knock::window_shown(edit(app.root, 37)); }, "tag selector closed");
         require(saved_note(persistent_id)["messages"] == persistent_messages, "Tag editing changed saved messages");
         const auto restart_draft = knock::widen("Unsent after restart\r\nStill deciding — café ✓");
         set_text(edit(app.root, 37), restart_draft);
@@ -856,14 +839,14 @@ int main() {
         eventually([&] { return lists(note_list(app.root), L"Persistent note"); }, "clearing search restores the list");
         const auto wide = screen_rect(app.root);
         click(button(app.root, L"HIDE NOTES"));
-        eventually([&] { return buttons(app.root, L"SHOW NOTES").size() == 1 && !IsWindowVisible(GetDlgItem(app.root, 62)); },
+        eventually([&] { return buttons(app.root, L"SHOW NOTES").size() == 1 && !knock::window_shown(GetDlgItem(app.root, 62)); },
                    "the arrow collapses the notes column");
         const auto narrow = screen_rect(app.root);
         require(narrow.right - narrow.left < wide.right - wide.left && narrow.top == wide.top,
                 "Collapsing notes did not narrow the bar in place");
         require(preferences().at("window").at("notes_collapsed") == true, "Collapsed notes were not remembered");
         click(button(app.root, L"SHOW NOTES"));
-        eventually([&] { return IsWindowVisible(GetDlgItem(app.root, 62)) && same_rect(wide, screen_rect(app.root)); },
+        eventually([&] { return knock::window_shown(GetDlgItem(app.root, 62)) && same_rect(wide, screen_rect(app.root)); },
                    "the arrow brings the notes column back");
         require(preferences().at("window").at("notes_collapsed") == false, "Shown notes were not remembered");
         passed("notes search filters titles; the arrow collapses and restores the notes column");
@@ -882,10 +865,10 @@ int main() {
             edit(app.root, 31), edit(app.root, 32), edit(app.root, 33), edit(app.root, 34)};
         open_settings(app.root, task_editors[2]);
         for (HWND control : task_editors)
-            require(IsWindow(control) && !IsWindowVisible(control), "Settings did not preserve and hide a task editor");
+            require(IsWindow(control) && !knock::window_shown(control), "Settings did not preserve and hide a task editor");
         back_from_settings(app.root);
         for (std::size_t i = 0; i < task_editors.size(); ++i)
-            require(edit(app.root, 31 + static_cast<int>(i)) == task_editors[i] && IsWindowVisible(task_editors[i]),
+            require(edit(app.root, 31 + static_cast<int>(i)) == task_editors[i] && knock::window_shown(task_editors[i]),
                     "Back from Settings recreated or lost a task editor");
         require(window_text(task_editors[0]) == L"Interface regression task" &&
                 window_text(task_editors[1]) == L"Native GUI regression coverage" &&

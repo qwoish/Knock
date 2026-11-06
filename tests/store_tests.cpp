@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -59,6 +60,171 @@ void write_file(const std::filesystem::path& path, const std::string& text) {
     std::ofstream stream(path, std::ios::binary | std::ios::trunc);
     stream << text;
     check(static_cast<bool>(stream), "test fixture write failed");
+}
+
+void agents_check_in_update_and_finish() {
+    Fixture f;
+    const auto before = f.store.snapshot();
+    check(before["agents"].empty(), "A fresh state lists agents");
+    fails(f.store.handle({{"op", "agent.start"}, {"chat", "UI-1"}}), "missing_field");
+    fails(f.store.handle({{"op", "agent.start"}, {"title", "No chat"}}), "missing_field");
+    fails(f.store.handle({{"op", "agent.start"}, {"chat", "UI-1"}, {"title", "   "}}), "empty_field");
+    fails(f.store.handle({{"op", "agent.start"}, {"chat", "UI-1"}, {"title", std::string(161, 'x')}}), "field_too_long");
+    fails(f.store.handle({{"op", "agent.start"}, {"chat", "UI-1"}, {"title", "x"}, {"report", "a\nb"}}), "invalid_report_path");
+    fails(f.store.handle({{"op", "agent.update"}, {"chat", "UI-1"}}), "missing_field");
+    check(f.store.snapshot()["agents"].empty(), "A refused check-in changed the list");
+
+    const auto started = ok(f.store.handle({{"op", "agent.start"}, {"chat", "UI-1"}, {"title", "  Redesign\n\x1b[31mthe window\x1b[0m "},
+                                            {"report", "C:\\r\\report.md"}}));
+    const auto first = started["agent"];
+    check(first["title"] == "Redesign the window" && first["status"] == "working" && first["status_text"] == "" &&
+          first["report"] == "C:\\r\\report.md" && started.contains("presence"), "Check-in record is wrong: " + started.dump());
+    check(!f.store.snapshot().contains("nothing") && f.store.snapshot()["agents"].size() == 1, "Check-in is not listed");
+
+    const auto updated = ok(f.store.handle({{"op", "agent.update"}, {"chat", "UI-1"}, {"status", "Running\ntests"}}))["agent"];
+    check(updated["id"] == first["id"] && updated["status_text"] == "Running tests" && updated["title"] == first["title"] &&
+          updated["started_at"] == first["started_at"], "A status changed more than the status");
+
+    // Done moves it on, and uses the report named at check-in.
+    const auto done = ok(f.store.handle({{"op", "done"}, {"chat", "UI-1"}, {"summary", "All done."}, {"report", ""}}))["done"];
+    check(done["report"] == "C:\\r\\report.md", "done did not use the check-in's report");
+    auto agent = f.store.snapshot()["agents"][0];
+    check(agent["status"] == "done" && agent.contains("finished_at"), "done did not finish the check-in");
+    check(!done.contains("title") && !done.contains("status_text"), "done's JSON gained check-in fields");
+    const auto named = ok(f.store.handle({{"op", "done"}, {"chat", "UI-1"}, {"summary", "Again."}, {"report", "C:\\other.md"}}))["done"];
+    check(named["report"] == "C:\\other.md", "An explicit report lost to the check-in's");
+
+    // Starting again is the same record, working, with the old status cleared.
+    const auto again = ok(f.store.handle({{"op", "agent.start"}, {"chat", "UI-1"}, {"title", "Second round"}}))["agent"];
+    check(again["id"] == first["id"] && again["status"] == "working" && again["status_text"] == "" && again["report"] == "" &&
+          !again.contains("finished_at") && f.store.snapshot()["agents"].size() == 1, "Restart did not replace the check-in");
+
+    // A job that never checked in appears when it is done, exactly as before.
+    const auto plain = ok(f.store.handle({{"op", "done"}, {"chat", "OLD-1"}, {"summary", "No check-in."}, {"report", ""}}))["done"];
+    check(plain["report"] == "" && f.store.snapshot()["agents"].size() == 1, "done created a check-in");
+
+    // A status alone also shows the job as working.
+    const auto lone = ok(f.store.handle({{"op", "agent.update"}, {"chat", "NEW-1"}, {"status", "Measuring"}}))["agent"];
+    check(lone["title"] == "Measuring" && lone["status"] == "working", "A lone status did not create a check-in");
+
+    // Dismissing hides it; hearing from the job again brings it back.
+    ok(f.store.handle({{"op", "item.dismiss"}, {"kind", "agent"}, {"id", lone["id"]}}));
+    const auto listed = f.store.snapshot()["agents"];
+    check(std::any_of(listed.begin(), listed.end(), [&](const Json& item) { return item["id"] == lone["id"] && item.value("archived", false); }),
+          "Dismiss did not archive the check-in");
+    check(!ok(f.store.handle({{"op", "agent.update"}, {"chat", "NEW-1"}, {"status", "Back"}}))["agent"].contains("archived"),
+          "A new status left the check-in archived");
+
+    // Everything survives a restart, and only the GUI still decides requests.
+    const auto saved = f.store.snapshot()["agents"];
+    Store reopened(f.directory);
+    reopened.load();
+    check(reopened.snapshot()["agents"] == saved, "Check-ins did not survive a restart");
+    const auto item = request(f.store, "UI-1");
+    ok(f.store.handle({{"op", "agent.update"}, {"chat", "UI-1"}, {"status", "Waiting"}}));
+    check(f.store.snapshot()["lease"].is_null() && ok(f.store.handle({{"op", "request.result"}, {"id", item["id"]}}))["request"]["status"] == "pending",
+          "A status changed a request or granted input");
+    std::cout << "PASS check-in, status, done, restart and dismiss\n";
+}
+
+void agents_are_validated_when_loaded() {
+    Fixture f;
+    ok(f.store.handle({{"op", "agent.start"}, {"chat", "UI-1"}, {"title", "Work"}}));
+    const auto good = Json::parse(read_file(f.directory / "state.json"));
+    const auto rejected = [&](const char* field, const Json& value) {
+        auto state = good;
+        if (value.is_null()) state["agents"][0].erase(field); else state["agents"][0][field] = value;
+        Fixture other;
+        other.store.stop();
+        write_file(other.directory / "state.json", state.dump());
+        Store bad(other.directory);
+        bool failed = false;
+        try { bad.load(); } catch (const std::runtime_error&) { failed = true; }
+        check(failed, std::string("A corrupt check-in loaded: ") + field);
+    };
+    rejected("chat", nullptr);
+    rejected("title", "");
+    rejected("status", "paused");
+    rejected("started_at", "soon");
+    std::cout << "PASS stored check-ins are validated\n";
+}
+
+// tests/fixtures/state-0.7.0.json was written by the store at commit 72f4709,
+// the source of the 0.7.0 build, through its own operations. See its README.
+std::filesystem::path fixture_0_7_0() {
+    return std::filesystem::path(KNOCK_TEST_FIXTURES) / "state-0.7.0.json";
+}
+
+void state_from_0_7_0_loads_unchanged() {
+    const auto original = read_file(fixture_0_7_0());
+    const auto expected = Json::parse(original);
+    for (const auto* key : {"requests", "jobs", "tasks", "notes", "trash", "inbox"})
+        check(!expected[key].empty(), std::string("The fixture has no ") + key);
+    check(!expected.contains("agents"), "The fixture is not from before check-ins");
+
+    Fixture f;
+    f.store.stop();
+    std::filesystem::remove_all(f.directory);
+    std::filesystem::create_directories(f.directory);
+    const auto path = f.directory / "state.json";
+    write_file(path, original);
+
+    Store loaded(f.directory);
+    loaded.load();
+    check(read_file(path) == original, "Opening a 0.7.0 state rewrote the file");
+
+    // Every record reads back whole through the CLI's reads.
+    const auto snapshot = loaded.snapshot();
+    for (const auto* key : {"requests", "jobs", "tasks", "inbox", "preferences", "presence", "lease", "schema"})
+        check(snapshot[key] == expected[key], std::string("A 0.7.0 field changed on load: ") + key);
+    check(snapshot["agents"].empty(), "Old state grew agents");
+    for (const auto& note : expected["notes"]) {
+        const auto read = ok(loaded.handle({{"op", "note.get"}, {"id", note["id"]}, {"limit", 100}}))["note"];
+        for (const auto& [key, value] : read.items()) {
+            if (key == "message_count") continue;
+            if (key == "messages") {
+                check(value.size() == note["messages"].size(), "A note lost messages");
+                for (std::size_t i = 0; i < value.size(); ++i)
+                    for (const auto* field : {"id", "text", "images", "created_at", "revision"})
+                        check(value[i][field] == note["messages"][i][field], std::string("A message changed: ") + field);
+            } else check(value == note[key], "A note changed on load: " + key);
+        }
+    }
+
+    // Written back through a real change: everything else is byte-for-byte equal
+    // JSON, and the only new top-level key is the list of check-ins.
+    ok(loaded.handle({{"op", "agent.start"}, {"chat", "UI-1"}, {"title", "New work"}}));
+    auto saved = Json::parse(read_file(path));
+    check(saved["agents"].size() == 1, "The check-in was not saved");
+    saved.erase("agents");
+    check(saved == expected, "Saving lost or changed 0.7.0 data");
+
+    // And it loads again with the check-in, still losing nothing.
+    loaded.stop();
+    Store again(f.directory);
+    again.load();
+    check(again.snapshot()["agents"].size() == 1, "The check-in did not survive");
+    check(again.snapshot()["requests"] == expected["requests"], "0.7.0 requests changed after reloading");
+
+    // An input lease from 0.7.0 ends on restart, the existing safety rule.
+    auto leased = expected;
+    for (auto& record : leased["requests"]) {
+        if (record["kind"] == "input" && record["status"] == "pending") {
+            record["status"] = "approved";
+            record["resolved_at"] = record["created_at"];
+            record["lease_until"] = knock::now_ms() + 60000;
+            leased["lease"] = {{"id", record["id"]}, {"chat", record["chat"]}, {"until", record["lease_until"]}};
+            break;
+        }
+    }
+    check(!leased["lease"].is_null(), "The fixture has no pending input request");
+    Fixture lease;
+    lease.store.stop();
+    write_file(lease.directory / "state.json", leased.dump());
+    Store relaunched(lease.directory);
+    relaunched.load();
+    check(relaunched.snapshot()["lease"].is_null(), "A 0.7.0 lease survived a restart");
+    std::cout << "PASS a state written by 0.7.0 opens unchanged and loses nothing\n";
 }
 
 void fresh_state_and_validation() {
@@ -1376,6 +1542,9 @@ void existing_outputs_keep_their_shape() {
 int main() {
     const std::vector<std::pair<const char*, std::function<void()>>> tests = {
         {"fresh state and invalid input", fresh_state_and_validation},
+        {"check-in, status and done", agents_check_in_update_and_finish},
+        {"stored check-ins are validated", agents_are_validated_when_loaded},
+        {"a state written by 0.7.0", state_from_0_7_0_loads_unchanged},
         {"GUI-only decisions and custom responses", permission_boundaries},
         {"concurrent input lease exclusivity", exclusive_concurrent_approvals},
         {"condition-variable wait and shutdown", waiting_and_stop},

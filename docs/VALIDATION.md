@@ -1,7 +1,7 @@
 # Validation
 
 The earlier sections retain the original platform and application checks.
-Version-specific additions follow; the latest results are in **Version 0.6**.
+Version-specific additions follow; the latest results are in **Version 0.8** at the end.
 
 ## Windows platform and local IPC
 
@@ -534,3 +534,39 @@ desktop checks.
   virtual display with Wine's LogPixels setting. Real Windows scaling, multiple
   monitors and a top-docked taskbar still need checking on a Windows desktop.
 
+## Version 0.8
+
+Built with MSVC 14.44 on Windows 11 and tested there, beside a running 0.7.0.
+
+**Automated.** All 12 CTest suites pass: 11 in a private window station through
+`isolated_run.exe`, and `hotkey` on a hidden desktop. New: `agents_ui` (the real
+`knock.exe` against a private `KnockTray`, list order, Done, and every control fitting
+at 96, 120, 144 and 192 DPI at the default and smallest sizes), check-in and 0.7.0-state
+checks in `store`, and contracts for `start` and `update` in `cli_info`. `cli_smoke.ps1`
+passes in a private window station. `tests/fixtures/state-0.7.0.json` was written by the
+store at commit 72f4709; it opens without the file changing and loses nothing. The store
+at 72f4709 was also run once by hand against a state holding check-ins: it loaded and
+kept them.
+
+The GUI suites were changed where the layout deliberately changed (rows run top to
+bottom; COPY REPORT is inside Done). In these suites menus use the `KNOCK_TEST_MENU`
+stand-in, because a native menu closes at once without the foreground.
+
+**Real desktop.** One session with a real mouse and keyboard, using the staged build
+and its own data folder: both monitors, each at real display scaling of 100, 125 and
+150 percent, changed through the Windows display settings API and restored. It covered
+the agents list, Done, COPY REPORT's confirmation, the wheel, typing a status, a custom
+reply, Settings, and the native right-click and tray menus. The window resized correctly
+each time the scale changed under it.
+
+**Not run on the real desktop.** Clicking the real tray icon (the tray menu was opened
+with the message the shell sends), a real press of the shortcut (a running Knock held
+it), notification banners, Explorer restart, and the real clipboard in that session (the
+clipboard is covered in the private station). The native Shortcut dialog and
+confirmation boxes were only exercised off the desktop.
+
+Run real-input tests on the main monitor; the owner's agents run on the second one, and
+never send a real Esc key.
+
+Screens drawn with `KNOCK_TEST_DPI` are real windows at a forced scale, not display
+scaling. The images in `docs/screenshots` are of that kind.

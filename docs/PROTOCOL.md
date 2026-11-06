@@ -42,7 +42,9 @@ Operations use an `op` string:
 - `note.purge`: id. GUI ONLY via trusted_ui=true. Permanently removes one trashed note; it cannot purge an active note. Returns `{ok:true}`. Image files and preserved composer drafts are not removed by this operation.
 - `done`: chat (required, max 64 bytes), summary (required, max 16000), report (optional path text, max 32768, no control characters), task (optional task ID). Records that the chat's job has finished. The summary is stored as plain text: ANSI/terminal escape sequences and control characters other than newline and tab are removed, and CR/CRLF become LF; a summary that is empty after cleaning is rejected. Without `task`, every task that is not yet `done` and whose operator equals the chat label, or whose title starts with `LABEL:` (ASCII case-insensitive), becomes `done`; with `task`, only that task does (missing IDs return `not_found`). There is one inbox record per chat: finishing again updates it in place (same id and created_at), clears `archived`, and moves it to the newest position. Returns `{ok:true,done:<record>}`. Record fields: id, chat, status (`done`), summary, report, created_at, finished_at, updated_at, tasks_completed (IDs changed by this call). Emits a `done` event.
 - `inbox.result`: id. Returns `{ok:true,done:<record>}`.
-- `item.dismiss`: kind (`request`, `job` or `inbox`), id. Marks archived=true; pending requests and running jobs cannot be dismissed. A dismissed inbox record stays in `list` results with `archived:true`.
+- `agent.start`: chat, title (one line, up to 160 bytes), report (may be empty). Creates or replaces the chat's check-in. Returns `{ok:true,agent:<record>,presence}`. Does not notify with a banner.
+- `agent.update`: chat, status (one line, up to 160 bytes). Sets `status_text` and `updated_at`; with no earlier check-in, creates one titled with that line. Returns the same shape.
+- `item.dismiss`: kind (`request`, `job`, `inbox` or `agent`), id. Marks archived=true; pending requests and running jobs cannot be dismissed. A dismissed inbox record stays in `list` results with `archived:true`.
 
 Store::handle catches validation/storage errors and returns JSON errors. Mutations are persisted atomically before a successful reply. Failed saves must leave state unchanged. load() preserves corrupt evidence and fails rather than overwriting it. Pending requests survive restart; input leases are revoked on restart (`released`). Completion history stays in the app even if Windows suppresses a banner.
 
@@ -59,6 +61,16 @@ available until retention expires or the note is permanently deleted.
 The `trash`, `inbox` and `preferences` fields are additive to schema 1. Existing state
 files receive empty trash and inbox collections and missing preference defaults on load.
 An older Knock reading a file with `inbox` ignores and keeps it.
+
+The `agents` collection (check-ins) is also additive to schema 1 and optional on load.
+A file without it opens unchanged and is not rewritten for it; `snapshot` always
+includes it. 0.7.0 reading a file with `agents` ignores and keeps it. When `done` runs,
+the chat's check-in gets `status:"done"` and `finished_at`; if `done` names no report,
+it uses the check-in's. The `done` response itself has the same fields as before.
+
+Pipe name, tray window class and app lock gain a suffix derived from the folder when
+`KNOCK_DATA_DIR` is set, so such a copy is a separate instance. The default names are
+unchanged.
 Invalid stored preference values are preserved as evidence and cause load to fail.
 Saved replies, busy deadline, and retention live in `state.json`; shortcut and
 window settings remain in the separate settings file. The top bar stores its size as

@@ -124,6 +124,28 @@ knock notify --chat AUDIO-4 --message "The audio build finished." --resume-text 
 
 This creates a copyable notice without running a command. It does not automatically resume an AI chat or send a message to another service.
 
+## Check in when a job starts
+
+```text
+knock start --chat UI-1 --title "Redesign the window" --report "C:\Reports\ui-1.md"
+knock update --chat UI-1 --status "Checking every screen at 125 percent"
+```
+
+- `start` shows the chat as working from that moment. `--chat` and `--title` are
+  required; `--title` is one line of up to 160 bytes. `--report` is optional and
+  stored as an absolute path; `done` uses it if `done` names no report.
+- `update` replaces one line saying what the job is doing now, up to 160 bytes. It
+  does not change the job's place in the list. Use it rarely; it is not a heartbeat.
+- Each chat has one check-in. Running `start` again replaces it and starts the clock
+  again. A `done`, or dismissing the row in the window, does not remove it; a later
+  `start` or `update` brings the job back to work. An `update` with no earlier
+  `start` also shows the job as working, using that line as its title.
+- Both print `{"ok":true,"agent":{...},"presence":{...}}`. The record has `id`,
+  `chat`, `title`, `status` (`working` or `done`), `status_text`, `report`,
+  `created_at`, `started_at`, `updated_at`, and `finished_at` once done.
+- Neither one grants input or answers anything. A job that never checks in still
+  appears when it asks, runs a command, or finishes.
+
 ## Report a finished job
 
 When an agent has finished its whole job, it reports once:
@@ -246,7 +268,7 @@ knock jobs --offset 50 --limit 50
 knock notes list --offset 20 --limit 20
 ```
 
-Data lives in `%LOCALAPPDATA%\Knock` by default. `KNOCK_DATA_DIR` can point to a separate directory for testing; use the same value for the tray and all CLI processes. Keep that override on a local disk. Logs, pending completion records, tasks, notes, and requests are local; Knock needs no account or API key.
+Data lives in `%LOCALAPPDATA%\Knock` by default. `KNOCK_DATA_DIR` can point to a separate directory for testing; use the same value for the tray and all CLI processes. It makes that copy a separate instance with its own pipe, window class and app lock, so it runs beside a normal Knock and cannot reach it. Keep that override on a local disk. Logs, pending completion records, tasks, notes, and requests are local; Knock needs no account or API key.
 
 ```powershell
 knock open

@@ -275,7 +275,8 @@ struct PipeServer::Impl {
             return {{"ok", false}, {"error", "Only the Knock interface can answer requests"}};
         }
         if (operation == "ui.show") {
-            const HWND window = FindWindowW(L"Knock.Tray.v1", nullptr);
+            const auto window_class = tray_window_class();
+            const HWND window = FindWindowW(window_class.c_str(), nullptr);
             const bool shown = window && PostMessageW(window, WM_APP + 20, 0, 0);
             return shown ? Json{{"ok", true}}
                          : Json{{"ok", false}, {"error", "Knock interface is unavailable"}};

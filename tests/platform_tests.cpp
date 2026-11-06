@@ -12,10 +12,6 @@ void require(bool condition, const char* description) {
 int main() {
     using namespace knock;
     try {
-        if (FindWindowW(L"Knock.Tray.v1", nullptr)) {
-            std::cout << "SKIP: close KnockTray before running local IPC tests.\n";
-            return 77;
-        }
         const std::string unicode = "Knock \xE2\x80\x94 \xF0\x9F\x8E\xA7 \xE6\xBC\xA2\xE5\xAD\x97";
         require(narrow(widen(unicode)) == unicode, "Unicode round trip failed");
         bool rejected = false;
@@ -42,8 +38,21 @@ int main() {
         wchar_t temp[MAX_PATH]{};
         require(GetTempPathW(MAX_PATH, temp) > 0, "No temp directory");
         const auto directory = std::filesystem::path(temp) / (L"knock-ipc-tests-" + std::to_wstring(GetCurrentProcessId()));
+        SetEnvironmentVariableW(L"KNOCK_DATA_DIR", nullptr);
+        const auto real_pipe = pipe_name();
+        const auto real_class = tray_window_class();
+        require(instance_tag().empty() && real_class == L"Knock.Tray.v1" &&
+                real_pipe == L"\\\\.\\pipe\\Knock.v1." + user_identity(), "The default instance names changed");
         SetEnvironmentVariableW(L"KNOCK_DATA_DIR", directory.c_str());
         require(data_directory() == directory, "Data directory override failed");
+        require(pipe_name() != real_pipe && tray_window_class() != real_class &&
+                app_lock_name().find(instance_tag()) != std::wstring::npos, "A private data folder still shares the default instance");
+        const auto tagged = pipe_name();
+        auto other_spelling = directory.wstring() + L"\\";
+        CharUpperBuffW(other_spelling.data(), static_cast<DWORD>(other_spelling.size()));
+        SetEnvironmentVariableW(L"KNOCK_DATA_DIR", other_spelling.c_str());
+        require(pipe_name() == tagged, "Two spellings of one folder became different instances");
+        SetEnvironmentVariableW(L"KNOCK_DATA_DIR", directory.c_str());
         Store store(directory);
         store.load();
         PipeServer server(store);

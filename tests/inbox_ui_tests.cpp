@@ -1,4 +1,5 @@
 #include "knock/platform.hpp"
+#include "test_isolation.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -14,7 +15,6 @@ using knock::Json;
 using namespace std::chrono_literals;
 
 namespace {
-constexpr wchar_t tray_class[] = L"Knock.Tray.v1";
 void require(bool value, const std::string& text) { if (!value) throw std::runtime_error(text); }
 
 template<class Predicate>
@@ -60,7 +60,7 @@ BOOL CALLBACK collect(HWND window, LPARAM data) {
     GetClassNameW(window, type, 64);
     if (_wcsicmp(type, query.type) != 0 || (query.id && GetDlgCtrlID(window) != query.id)) return TRUE;
     if (!query.caption.empty() && text(window) != query.caption) return TRUE;
-    if (IsWindowVisible(window)) query.matches.push_back(window);
+    if (knock::window_shown(window)) query.matches.push_back(window);
     return TRUE;
 }
 std::vector<HWND> find(HWND root, const wchar_t* type, const std::wstring& caption = {}, int id = 0) {
@@ -90,18 +90,10 @@ GUITHREADINFO gui(HWND root) {
 }
 void menu_action(HWND root, const std::function<void()>& open, std::initializer_list<UINT> keys) {
     open();
-    HWND owner = nullptr;
-    try {
-        eventually([&] {
-            const auto state = gui(root);
-            owner = state.hwndMenuOwner;
-            return (state.flags & GUI_INMENUMODE) && owner &&
-                   GetWindowThreadProcessId(owner, nullptr) == GetWindowThreadProcessId(root, nullptr);
-        }, "native menu opens");
-        for (auto key : keys) require(PostMessageW(owner, WM_KEYDOWN, key, 1), "Cannot navigate test menu");
-        eventually([&] { return !(gui(root).flags & GUI_INMENUMODE); }, "native menu closes");
-        message(root, WM_NULL);
-    } catch (...) { PostMessageW(root, WM_CANCELMODE, 0, 0); throw; }
+    eventually([&] { return test_menu_open(root); }, "menu opens");
+    choose_test_menu(root, keys);
+    eventually([&] { return !test_menu_open(root); }, "menu closes");
+    message(root, WM_NULL);
 }
 void button_menu(HWND root, const std::wstring& caption, std::initializer_list<UINT> keys) {
     const auto target = button(root, caption);
@@ -118,12 +110,12 @@ void require_presence_column(HWND root) {
     for (const auto* caption : {L"AT PC", L"AWAY", L"BUSY"}) button(root, caption);
     require(edit(root, 45) != nullptr, "Status message box is missing");
 }
-// Cards are ordered left to right; this picks a card's button by position.
-HWND leftmost(HWND root, const std::wstring& caption) {
+// Agents are listed top to bottom; this picks a row's button by position.
+HWND topmost(HWND root, const std::wstring& caption) {
     auto matches = find(root, L"BUTTON", caption);
     require(!matches.empty(), "No button: " + knock::narrow(caption));
     return *std::min_element(matches.begin(), matches.end(), [](HWND a, HWND b) {
-        RECT ra{}, rb{}; GetWindowRect(a, &ra); GetWindowRect(b, &rb); return ra.left < rb.left;
+        RECT ra{}, rb{}; GetWindowRect(a, &ra); GetWindowRect(b, &rb); return ra.top < rb.top;
     });
 }
 std::wstring clipboard_text() {
@@ -181,7 +173,7 @@ void capture(HWND root, const std::filesystem::path& path) {
     HBITMAP bitmap = CreateCompatibleBitmap(dc, width, height);
     require(memory && bitmap, "Cannot allocate test screenshot");
     auto old = SelectObject(memory, bitmap);
-    require(BitBlt(memory, 0, 0, width, height, dc, 0, 0, SRCCOPY), "Cannot copy test screenshot");
+    require(PrintWindow(root, memory, 0), "Cannot copy test screenshot");
     SelectObject(memory, old);
     BITMAPINFO info{};
     info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -214,6 +206,7 @@ struct Application {
         require(GetTempPathW(MAX_PATH, temp), "Cannot find temp folder");
         directory = std::filesystem::path(temp) / (L"knock-inbox-ui-" + knock::widen(knock::make_id()));
         require(SetEnvironmentVariableW(L"KNOCK_DATA_DIR", directory.c_str()), "Cannot isolate application data");
+        SetEnvironmentVariableW(L"KNOCK_TEST_MENU", L"1");
     }
     ~Application() { try { close(); } catch (...) {} }
     void launch() {
@@ -224,18 +217,18 @@ struct Application {
             nullptr, executable.parent_path().c_str(), &startup, &child), "Cannot launch private test app");
         CloseHandle(child.hThread); process = child.hProcess; pid = child.dwProcessId;
         eventually([&] {
-            root = FindWindowW(tray_class, nullptr);
+            root = FindWindowW(knock::tray_window_class().c_str(), nullptr);
             if (!root) return false;
             DWORD actual = 0; GetWindowThreadProcessId(root, &actual);
             require(actual == pid, "Refusing to control another app's window");
-            return IsWindowVisible(root) && find(root, L"BUTTON", L"AT PC").size() == 1;
+            return knock::window_shown(root) && find(root, L"BUTTON", L"AT PC").size() == 1;
         }, "application startup");
         eventually([&] { try { return knock::send_command({{"op", "status"}}, false).value("ok", false); } catch (...) { return false; } }, "IPC startup");
         // Pin this test popup through the app's own hotkey message. No global
         // input is generated, even if this test runs on a normal desktop.
         message(root, WM_HOTKEY, 0x4B10, MAKELPARAM(MOD_CONTROL | MOD_ALT, 'K'));
         message(root, WM_HOTKEY, 0x4B10, MAKELPARAM(MOD_CONTROL | MOD_ALT, 'K'));
-        eventually([&] { return IsWindowVisible(root); }, "hotkey-pinned popup");
+        eventually([&] { return knock::window_shown(root); }, "hotkey-pinned popup");
     }
     void close() {
         if (!process) return;
@@ -253,7 +246,7 @@ void passed(const char* label) { std::cout << "PASS " << label << '\n' << std::f
 }
 
 int main() {
-    if (FindWindowW(tray_class, nullptr)) { std::cout << "SKIP: close KnockTray before inbox tests.\n"; return 77; }
+    if (skip_outside_isolation()) return 77;
     try {
         Application app;
         app.launch();
@@ -347,20 +340,32 @@ int main() {
         notice("BUILD-2");
         eventually([&] { return find(app.root, L"BUTTON", L"COPY").size() == 2 && find(app.root, L"BUTTON", L"YES").size() == 1; },
                    "waiting card and newer notice");
-        require(bounds(button(app.root, L"YES")).left < bounds(leftmost(app.root, L"COPY")).left,
-                "A newer completion pushed a waiting card after it");
+        require(bounds(button(app.root, L"YES")).top < bounds(topmost(app.root, L"COPY")).top,
+                "A newer completion pushed a waiting row below it");
         send({{"op", "done"}, {"chat", "BUILD-2"}, {"summary", "Both builds passed.\nNothing was committed."},
               {"report", "C:\\Reports\\build-2.md"}});
-        eventually([&] { return find(app.root, L"BUTTON", L"COPY REPORT").size() == 1 && find(app.root, L"BUTTON", L"COPY").size() == 1; },
-                   "the finished job's card turns to DONE");
-        click(button(app.root, L"COPY REPORT"));
+        eventually([&] { return find(app.root, L"BUTTON", L"DONE (1)").size() == 1 && find(app.root, L"BUTTON", L"COPY").size() == 1; },
+                   "the finished job moves into the closed Done section");
+        require(find(app.root, L"BUTTON", L"COPY REPORT").empty(), "Done section was not closed");
+        click(button(app.root, L"DONE (1)"));
+        eventually([&] { return find(app.root, L"BUTTON", L"COPY REPORT").size() == 1; }, "Done opens");
+        const auto children_before = find(app.root, L"BUTTON").size() + find(app.root, L"EDIT").size();
+        const auto copy_report = button(app.root, L"COPY REPORT");
+        const auto line_before = text(app.root);
+        click(copy_report);
         eventually([&] { return clipboard_text() == L"Both builds passed.\r\nNothing was committed.\r\n\r\nC:\\Reports\\build-2.md"; },
                    "COPY REPORT puts the exact summary and path on the clipboard");
+        // The whole confirmation: the button says so for a moment. No box, no text
+        // over the list, no new controls, and nothing in the strip's line of feedback.
+        require(text(copy_report) == L"COPIED" && text(app.root) == line_before &&
+                find(app.root, L"BUTTON").size() + find(app.root, L"EDIT").size() == children_before,
+                "COPY REPORT showed more than a small confirmation");
+        eventually([&] { return IsWindow(copy_report) && text(copy_report) == L"COPY REPORT"; }, "the button returns to COPY REPORT");
         const auto dismissed = find(app.root, L"BUTTON", L"DISMISS");
-        require(!dismissed.empty(), "Finished card has no dismiss button");
+        require(!dismissed.empty(), "Finished row has no dismiss button");
         PostMessageW(*std::max_element(dismissed.begin(), dismissed.end(), [](HWND a, HWND b) {
-            RECT ra{}, rb{}; GetWindowRect(a, &ra); GetWindowRect(b, &rb); return ra.left < rb.left; }), BM_CLICK, 0, 0);
-        eventually([&] { return find(app.root, L"BUTTON", L"COPY REPORT").empty(); }, "dismissed DONE card disappears");
+            RECT ra{}, rb{}; GetWindowRect(a, &ra); GetWindowRect(b, &rb); return ra.top < rb.top; }), BM_CLICK, 0, 0);
+        eventually([&] { return find(app.root, L"BUTTON", L"COPY REPORT").empty(); }, "dismissed DONE row disappears");
         require(send({{"op", "list"}, {"collection", "inbox"}}).at("items")[0].at("archived") == true,
                 "Dismissing a DONE card did not archive its record");
         require(result(pending).at("status") == "pending" && state().at("lease").is_null() &&
@@ -368,7 +373,7 @@ int main() {
         const auto expiring = request("EXPIRES", 1);
         eventually([&] { return result(expiring).at("status") == "expired"; }, "request expiry while busy");
         require(state().at("lease").is_null(), "Busy expiry granted input");
-        passed("waiting cards first, DONE cards, exact COPY REPORT text, dismissal, and expiry during busy mode");
+        passed("waiting rows first, a closed Done section, exact COPY REPORT text with a small confirmation, dismissal, and expiry during busy mode");
 
         open_settings(app.root);
         click(button(app.root, L"MORE >"));
@@ -414,7 +419,7 @@ int main() {
         back(app.root);
         const auto lease_check = request("LEASE-CHECK");
         eventually([&] { return find(app.root, L"BUTTON", L"YES").size() == 2; }, "lease layout fixture arrives");
-        click(leftmost(app.root, L"YES")); // The newest waiting card is first.
+        click(topmost(app.root, L"YES")); // The newest waiting row is first.
         eventually([&] { return result(lease_check).at("status") == "approved"; }, "UI grants private test lease");
         open_settings(app.root);
         settings_bounds(app.root);

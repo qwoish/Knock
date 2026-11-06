@@ -7,7 +7,9 @@ They ask here, I answer, and they can get on with it. It also catches the output
 from long builds and tells me when they're done, so an agent doesn't have to
 keep checking a terminal.
 
-There's a task list and a place for personal notes too. The notes are basically
+Agents check in when they start, so I can see at a glance who is working, who is
+waiting for me and who has finished. There's a task list and a place for personal
+notes too. The notes are basically
 conversations with yourself: text, links, screenshots, and whatever else you
 want to keep together.
 
@@ -23,21 +25,23 @@ The ZIP includes the ready-built app and CLI. Extract the whole thing and run
 
 ## What it looks like
 
-![Knock's bar: tasks, job cards, status and notes](docs/screenshots/bar-100.png)
+![Knock's window: your status along the top, then agents, tasks and notes](docs/screenshots/agents-100.png)
 
 <details>
-<summary>At 125% and 150% scaling, and with the notes tucked away</summary>
+<summary>The Done section, 125% and 150% scaling, and the notes tucked away</summary>
 
-![The bar at 125% scaling](docs/screenshots/bar-125.png)
+![The Done section open, with its newest job first](docs/screenshots/agents-done-open.png)
 
-![The bar at 150% scaling](docs/screenshots/bar-150.png)
+![The window at 125% scaling](docs/screenshots/agents-125.png)
 
-![The notes column collapsed with the arrow](docs/screenshots/bar-notes-collapsed.png)
+![The window at 150% scaling](docs/screenshots/agents-150.png)
+
+![The notes column tucked away with the arrow](docs/screenshots/agents-notes-collapsed.png)
 
 </details>
 
-These are captures of the Windows build running under Wine, using sample
-records. Your own install starts empty.
+These are captures of the real Windows build using sample records. Your own install
+starts empty.
 
 ## Using it
 
@@ -48,14 +52,18 @@ There's no extra application runtime to install.
 Click the tray icon or press **Ctrl + Alt + K** to open or hide it. It's a wide
 bar along the top of the screen, centred:
 
-- **Task List** on the left. Click a task to edit it; type in **New task...**
-  and press **Enter** to add one.
-- **Job cards** in the middle, one per chat label. Each has a status tag
-  (**WAITING**, **WORKING** or **DONE**), the job's name, its own little pixel
-  character, and what it's asking or reporting. A request has **YES**,
-  **CUSTOM** and **NO** under it; a finished job has **COPY REPORT**. Scroll
-  sideways when there are more cards than fit. **×** clears a card.
-- **Your status** (At PC, Away, Busy) with an optional message.
+- **Your status** runs along the top: At PC, Away or Busy, with an optional message.
+  Short confirmations appear beside it. If an agent has the mouse, you'll see who
+  and for how long, with **RELEASE** next to it. **SETTINGS** is at the far right.
+- **Agents** fills the first column, one row per chat label, each with its own little
+  pixel character. Agents waiting for you come first with **YES**, **CUSTOM** and
+  **NO**, then working ones, newest at the top. The rows don't move around while
+  work goes on. Click a row that says **read all** to read it in full. **×** clears
+  a row.
+- **Done (3)** stays under the list. It opens the finished jobs, newest first; each
+  has **COPY REPORT**, which says **COPIED** for a moment.
+- **Tasks**, beside that. Click a task to edit it; type in **New task...** and press
+  **Enter** to add one. Finished tasks sink to the bottom.
 - **Notes** with a search box. The arrow on the far right tucks the notes away
   and brings them back; Knock remembers which you chose.
 
@@ -64,7 +72,7 @@ with the shortcut keeps it open and on top while you use other windows. Press
 the shortcut again or choose **Hide Knock** from the right-click menu when
 you're done. **Escape** backs out of the current view, then hides the bar.
 
-Right-click anywhere in the bar and choose **Settings** to make it yours:
+Press **SETTINGS**, or right-click anywhere and choose **Settings**, to make it yours:
 
 - **CHANGE** lets you record a different hotkey or disable it.
 - Set the bar's width and height, then **APPLY**. The range is 900–3840 wide
@@ -79,19 +87,18 @@ stay in Trash. Right-click anywhere and choose **Quiet notifications...** to qui
 for 15 minutes, 30 minutes, or an hour. Requests still wait in the inbox and keep
 their normal expiry. When the timer ends, Knock sends one inbox summary.
 
-Cards waiting for an answer come first, then working ones, then finished ones.
-**CUSTOM** turns the card's text box into a reply box; **SAVED** puts a preset
-into it, edit it if needed, then press **SEND**. Manage your own presets in
-Settings → More. The characters are drawn by Knock from the job's name, so the
-same job always gets the same one.
+**CUSTOM** opens a reply box in the row; **SAVED** puts a preset into it, edit it if
+needed, then press **SEND**. Manage your own presets in Settings → More. The
+characters are drawn by Knock from the job's name, so the same job always gets the
+same one.
 
 To update, quit the running copy and replace its application files. Saved data
 lives separately, so your notes and tasks stay put.
 
 ### Stepping away
 
-Use the status column: click **At PC**, **Away**, or **Busy**. The message
-box under it is optional; it's saved with the status when you click one, when
+Use the strip along the top: click **At PC**, **Away**, or **Busy**. The message
+box beside it is optional; it's saved with the status when you click one, when
 you press **Enter**, or a moment after you stop typing. Something like “Out
 for coffee” or “In a meeting; headless tests are fine” is enough. **Status...**
 in the right-click or tray menu jumps to the message box. Until you pick one,
@@ -169,6 +176,21 @@ tray or reading your saved data. `get-info` is an alias. The same guide is in
 [AGENT_INSTRUCTIONS.md](docs/AGENT_INSTRUCTIONS.md), beside the executables in
 the portable package.
 
+The one line to add to an agent's start-up is:
+
+```powershell
+.\knock.exe start --chat AUDIO-1 --title "Add the mixer tests" --report "C:\Projects\Current\report.md"
+```
+
+That shows it as working from that moment; `--report` is optional. While it works
+it can change one line saying what it's doing now:
+
+```powershell
+.\knock.exe update --chat AUDIO-1 --status "Running the mixer tests"
+```
+
+A job that never checked in still turns up when it asks for something or finishes.
+
 A request looks like this, from PowerShell in the Knock folder:
 
 ```powershell
@@ -188,7 +210,7 @@ For a build you want to leave running:
 ```
 
 Knock captures the result and sends a notification when it finishes. Use
-**COPY** on the job's card and paste the message back into the named chat
+**COPY** on the job's row and paste the message back into the named chat
 to wake the agent up. Resuming a chat automatically would need support from
 that agent's host.
 
@@ -198,9 +220,10 @@ When an agent has finished the whole job, it tells you:
 .\knock.exe done --chat AUDIO-1 --summary "Mixer done; all 40 tests pass. Nothing committed." --report "C:\Projects\Current\report.md"
 ```
 
-Its card turns to **DONE** with the summary, and a task for that chat (operator
+It moves to **Done** with the summary, and a task for that chat (operator
 `AUDIO-1`, or a title starting `AUDIO-1:`) is ticked off. **COPY REPORT** puts
-the summary and the report path on the clipboard as plain text.
+the summary and the report path on the clipboard as plain text. If `done` names no
+report, it uses the one from `knock start`.
 `.\knock.exe inbox` lists finished jobs as JSON for other tools.
 
 This is a cooperative permission system: agents have to follow the answer.
@@ -232,18 +255,23 @@ doesn't download dependencies. In a Visual Studio developer terminal:
 ```powershell
 cmake -S . -B build -A x64
 cmake --build build --config Release --parallel
-ctest --test-dir build -C Release --output-on-failure
+build\Release\isolated_run.exe -- ctest --test-dir build -C Release --output-on-failure -E "^hotkey$"
+build\Release\isolated_run.exe --desktop -- ctest --test-dir build -C Release --output-on-failure -R "^hotkey$"
 cmake --install build --config Release --prefix out/Knock
 ```
 
-Close other copies of Knock before running the Windows integration tests.
-The source also includes a MinGW cross-build toolchain and Linux core tests;
-see [HANDOFF.md](HANDOFF.md) and [VALIDATION.md](docs/VALIDATION.md).
+You can leave your own Knock running. `isolated_run` keeps the GUI tests in a private
+window station with their own clipboard, or for the shortcut tests on a hidden
+desktop, so nothing appears on screen. Each test copy uses its own data folder
+(`KNOCK_DATA_DIR`), and that alone gives it its own pipe and window, so it can't
+reach your real Knock. Without `isolated_run` the GUI tests skip themselves.
 
-The executables and UI have been exercised under Wine on Linux. Actual Windows
-11 notification, taskbar, Start-menu/focus, display-scaling, and multi-monitor
-behavior still need desktop checks. The validation notes say exactly what was
-tested.
+`build\Release\isolated_run.exe --desktop -- build\Release\ui_gallery.exe FOLDER [DPI]`
+saves every screen of a private copy as images, with sample records.
+
+The source also includes a MinGW cross-build toolchain and Linux core tests; see
+[HANDOFF.md](HANDOFF.md) and [VALIDATION.md](docs/VALIDATION.md). The validation
+notes say exactly what was tested and how.
 
 More detail: [CLI reference](docs/CLI.md) · [local protocol](docs/PROTOCOL.md) ·
 [feature tracker](docs/FEATURES.md).

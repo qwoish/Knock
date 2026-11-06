@@ -1,4 +1,5 @@
 #include "knock/platform.hpp"
+#include "test_isolation.hpp"
 
 #include <algorithm>
 #include <array>
@@ -15,7 +16,6 @@ using knock::Json;
 using namespace std::chrono_literals;
 
 namespace {
-constexpr wchar_t tray_class[] = L"Knock.Tray.v1";
 
 void require(bool condition, const std::string& description) {
     if (!condition) throw std::runtime_error(description);
@@ -73,7 +73,7 @@ HWND edit(HWND root, int id) {
 }
 RECT control_bounds(HWND control) {
     RECT bounds{};
-    require(control && IsWindowVisible(control) && GetWindowRect(control, &bounds), "Visible control bounds are unavailable");
+    require(control && knock::window_shown(control) && GetWindowRect(control, &bounds), "Visible control bounds are unavailable");
     return bounds;
 }
 void inside_parent(HWND control) {
@@ -122,28 +122,10 @@ GUITHREADINFO gui(HWND root) {
 }
 void screenshot(HWND root, const wchar_t* filename);
 void menu(HWND root, HWND source, LPARAM point, std::initializer_list<UINT> keys) {
-    require(source == root || IsChild(root, source), "Refusing another process's menu source");
-    require(PostMessageW(source, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(source), point) != 0,
-            "Cannot open native context menu");
-    HWND owner = nullptr;
-    try {
-        eventually([&] {
-            const auto info = gui(root);
-            owner = info.hwndMenuOwner;
-            return (info.flags & GUI_INMENUMODE) && owner;
-        }, "native menu opens");
-    } catch (...) {
-        const auto info = gui(root);
-        std::cerr << "Menu timeout: visible=" << IsWindowVisible(root) << " source=" << source
-                  << " flags=" << info.flags << " active=" << info.hwndActive
-                  << " focus=" << info.hwndFocus << " owner=" << info.hwndMenuOwner << '\n';
-        screenshot(root, L"note-menu-failure.bmp");
-        throw;
-    }
-    require(GetWindowThreadProcessId(owner, nullptr) == GetWindowThreadProcessId(root, nullptr),
-            "Refusing another process's menu");
-    for (const auto key : keys) PostMessageW(owner, WM_KEYDOWN, key, 1);
-    eventually([&] { return !(gui(root).flags & GUI_INMENUMODE); }, "native menu closes");
+    require(PostMessageW(source, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(source), point) != 0, "Cannot open menu");
+    eventually([&] { return test_menu_open(root); }, "menu opens");
+    choose_test_menu(root, keys);
+    eventually([&] { return !test_menu_open(root); }, "menu closes");
     message(root, WM_NULL);
 }
 void entry_menu(HWND root, int y, std::initializer_list<UINT> keys) {
@@ -154,7 +136,7 @@ void entry_menu(HWND root, int y, std::initializer_list<UINT> keys) {
 }
 void open_settings(HWND root) {
     menu(root, root, -1, {VK_HOME, VK_RETURN});
-    eventually([&] { return IsWindowVisible(edit(root, 41)); }, "Settings opens");
+    eventually([&] { return knock::window_shown(edit(root, 41)); }, "Settings opens");
 }
 void ctrl_find(HWND root) {
     // Share only the test app's input queue. SetKeyboardState changes the
@@ -174,7 +156,7 @@ void ctrl_find(HWND root) {
     }
     SetKeyboardState(previous.data());
     AttachThreadInput(GetCurrentThreadId(), thread, FALSE);
-    eventually([&] { return IsWindowVisible(edit(root, 52)); }, "Ctrl+F opens note search");
+    eventually([&] { return knock::window_shown(edit(root, 52)); }, "Ctrl+F opens note search");
 }
 std::wstring clipboard() {
     eventually([] { return OpenClipboard(nullptr) != 0; }, "clipboard opens");
@@ -200,7 +182,7 @@ std::wstring copied_entry(HWND root, int y) {
 void command(HWND root, const std::wstring& text) {
     set_text(edit(root, 30), text);
     enter(edit(root, 30));
-    eventually([&] { return IsWindowVisible(edit(root, 51)); }, "note command page opens");
+    eventually([&] { return knock::window_shown(edit(root, 51)); }, "note command page opens");
 }
 void back(HWND root) { click(button(root, L"< BACK")); }
 // Notes are listed in a drawn side panel; /find-note opens one by title.
@@ -229,16 +211,8 @@ void answer_delete(HWND root, int answer) {
 }
 void start_busy_timer(HWND root) {
     PostMessageW(button(root, L"SET TIMER"), BM_CLICK, 0, 0);
-    HWND owner = nullptr;
-    eventually([&] {
-        const auto info = gui(root);
-        owner = info.hwndMenuOwner;
-        return (info.flags & GUI_INMENUMODE) && owner;
-    }, "busy timer choices open");
-    require(GetWindowThreadProcessId(owner, nullptr) == GetWindowThreadProcessId(root, nullptr),
-            "Refusing another process's menu");
-    PostMessageW(owner, WM_KEYDOWN, VK_HOME, 1);
-    PostMessageW(owner, WM_KEYDOWN, VK_RETURN, 1);
+    eventually([&] { return test_menu_open(root); }, "busy timer choices open");
+    choose_test_menu(root, {VK_HOME, VK_RETURN});
     eventually([&] { return snapshot().at("preferences").at("busy_until").get<std::int64_t>() > knock::now_ms(); },
                "busy timer starts");
 }
@@ -254,7 +228,7 @@ void screenshot(HWND root, const wchar_t* filename) {
     HDC memory = CreateCompatibleDC(source);
     HBITMAP bitmap = CreateCompatibleBitmap(source, width, height);
     const auto previous = SelectObject(memory, bitmap);
-    BitBlt(memory, 0, 0, width, height, source, 0, 0, SRCCOPY);
+    PrintWindow(root, memory, 0);
     SelectObject(memory, previous);
     BITMAPINFO info{};
     info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -291,6 +265,7 @@ struct Application {
         require(GetTempPathW(MAX_PATH, path) != 0, "Cannot find temporary folder");
         directory = std::filesystem::path(path) / (L"knock-notes-ui-" + knock::widen(knock::make_id()));
         require(SetEnvironmentVariableW(L"KNOCK_DATA_DIR", directory.c_str()) != 0, "Cannot isolate test state");
+        SetEnvironmentVariableW(L"KNOCK_TEST_MENU", L"1");
     }
     ~Application() { try { close(); } catch (...) {} }
     void launch() {
@@ -305,12 +280,12 @@ struct Application {
         process = child.hProcess;
         pid = child.dwProcessId;
         eventually([&] {
-            root = FindWindowW(tray_class, nullptr);
+            root = FindWindowW(knock::tray_window_class().c_str(), nullptr);
             if (!root) return false;
             DWORD owner = 0;
             GetWindowThreadProcessId(root, &owner);
             require(owner == pid, "Refusing another Knock process");
-            return IsWindowVisible(root) && edit(root, 30) != nullptr;
+            return knock::window_shown(root) && edit(root, 30) != nullptr;
         }, "test app starts");
         eventually([&] {
             try { return knock::send_command({{"op", "status"}}, false).value("ok", false); }
@@ -318,7 +293,7 @@ struct Application {
         }, "test IPC starts");
         message(root, WM_CLOSE);
         message(root, WM_HOTKEY, 0x4B10, MAKELPARAM(MOD_CONTROL | MOD_ALT, 'K'));
-        eventually([&] { return IsWindowVisible(root); }, "pinned popup opens");
+        eventually([&] { return knock::window_shown(root); }, "pinned popup opens");
     }
     void close() {
         if (!process) return;
@@ -338,10 +313,7 @@ struct Application {
 } // namespace
 
 int main() {
-    if (FindWindowW(tray_class, nullptr)) {
-        std::cout << "SKIP: close Knock before running the notes UI checks.\n";
-        return 77;
-    }
+    if (skip_outside_isolation()) return 77;
     try {
         Application app;
         std::string archive;
@@ -486,13 +458,13 @@ int main() {
         open_settings(app.root);
         send({{"op", "note.append"}, {"id", archive}, {"text", "Needle added while Settings was open"}});
         PostMessageW(button(app.root, L"< BACK"), BM_CLICK, 0, 0);
-        eventually([&] { return IsWindowVisible(find); }, "incoming entry and Settings Back reach the UI");
-        require(edit(app.root, 52) == find && caption(find) == L"needle" && IsWindowVisible(find),
+        eventually([&] { return knock::window_shown(find); }, "incoming entry and Settings Back reach the UI");
+        require(edit(app.root, 52) == find && caption(find) == L"needle" && knock::window_shown(find),
                 "Settings or incoming entry replaced the note find field");
         require(edit(app.root, 37) == composer && caption(composer) == L"Keep this composer while finding things",
                 "Settings replaced the unsent composer");
         message(find, WM_KEYDOWN, VK_ESCAPE);
-        require(!IsWindowVisible(find) && IsWindowVisible(composer), "Escape did not close only the find bar");
+        require(!knock::window_shown(find) && knock::window_shown(composer), "Escape did not close only the find bar");
         passed("Settings and incoming entries preserve note search controls and composer drafts");
 
         back(app.root);
@@ -530,15 +502,15 @@ int main() {
         eventually([&] { return buttons(app.root, L"SET TIMER").size() == 1; }, "More Settings opens");
         start_busy_timer(app.root);
         PostMessageW(button(app.root, L"< BACK"), BM_CLICK, 0, 0);
-        eventually([&] { return IsWindowVisible(edit(app.root, 41)); }, "general Settings returns");
+        eventually([&] { return knock::window_shown(edit(app.root, 41)); }, "general Settings returns");
         PostMessageW(button(app.root, L"< BACK"), BM_CLICK, 0, 0);
-        eventually([&] { return !IsWindowVisible(edit(app.root, 41)); }, "Settings closes");
+        eventually([&] { return !knock::window_shown(edit(app.root, 41)); }, "Settings closes");
         send({{"op", "note.add"}, {"title", "Undo sample"}});
         command(app.root, L"/delete-note Undo sample");
         PostMessageW(button(app.root, L"DELETE Undo sample"), BM_CLICK, 0, 0);
         eventually([&] { return snapshot().at("trash").size() == 1; }, "Undo sample enters Trash");
         PostMessageW(button(app.root, L"< BACK"), BM_CLICK, 0, 0);
-        eventually([&] { return IsWindowVisible(edit(app.root, 30)); }, "Notes list returns");
+        eventually([&] { return knock::window_shown(edit(app.root, 30)); }, "Notes list returns");
         set_text(edit(app.root, 30), L"/");
         for (int count = 0; count < 4; ++count) message(edit(app.root, 30), WM_KEYDOWN, VK_DOWN);
         const auto content = FindWindowExW(app.root, nullptr, L"Knock.Content.v1", nullptr);
@@ -558,13 +530,13 @@ int main() {
               {"images", {"reference.png"}}});
         command(app.root, L"/find-note Compact layout");
         enter(edit(app.root, 51));
-        eventually([&] { return IsWindowVisible(edit(app.root, 37)); }, "compact conversation opens");
+        eventually([&] { return knock::window_shown(edit(app.root, 37)); }, "compact conversation opens");
         require(caption(edit(app.root, 37)).empty(), "Compact conversation has an unexpected draft");
         message(edit(app.root, 37), WM_KEYDOWN, VK_UP);
         eventually([&] { return buttons(app.root, L"SAVE EDIT").size() == 1; }, "image entry edit opens");
         require(buttons(app.root, L"x").size() == 1, "Attachment is missing from the compact edit draft");
         ctrl_find(app.root);
-        for (HWND control : buttons(app.root)) if (IsWindowVisible(control)) inside_parent(control);
+        for (HWND control : buttons(app.root)) if (knock::window_shown(control)) inside_parent(control);
         inside_parent(edit(app.root, 37));
         inside_parent(edit(app.root, 52));
         require(control_bounds(edit(app.root, 37)).bottom <= control_bounds(button(app.root, L"SAVE EDIT")).top,
@@ -575,10 +547,10 @@ int main() {
         send({{"op", "task.add"}, {"title", "Compact task"}, {"body", "Keep the metadata controls separate."}});
         eventually([&] { return snapshot().at("tasks").size() == 1; }, "compact task appears");
         open_first_task(app.root);
-        eventually([&] { return IsWindowVisible(edit(app.root, 33)) && IsWindowVisible(edit(app.root, 34)); },
+        eventually([&] { return knock::window_shown(edit(app.root, 33)) && knock::window_shown(edit(app.root, 34)); },
                    "compact task metadata opens");
         for (int id : {31, 32, 33, 34}) inside_parent(edit(app.root, id));
-        for (HWND control : buttons(app.root)) if (IsWindowVisible(control)) inside_parent(control);
+        for (HWND control : buttons(app.root)) if (knock::window_shown(control)) inside_parent(control);
         require(control_bounds(edit(app.root, 32)).bottom <= control_bounds(edit(app.root, 33)).top &&
                 control_bounds(edit(app.root, 32)).bottom <= control_bounds(edit(app.root, 34)).top,
                 "Task description overlaps metadata with presence, input and quiet strips");

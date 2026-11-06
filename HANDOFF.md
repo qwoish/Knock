@@ -6,7 +6,7 @@ Knock is a compact Windows tray app with a terminal-style interface. Native Win3
 
 ## Implementation
 
-Version 0.6.0 is a portable Windows x64 application. Keep `KnockTray.exe`,
+Version 0.8.0 is a portable Windows x64 application. Keep `KnockTray.exe`,
 `knock.exe`, and the `assets` directory together. There is no web runtime,
 server account, or network listener.
 
@@ -17,24 +17,28 @@ notices. Extract the complete archive and launch `KnockTray.exe`; no build step
 is required. Saved data remains under `%LOCALAPPDATA%\Knock`.
 
 - C++20, Win32/GDI/GDI+, per-account/session named pipe, durable JSON store.
-- UI: a wide bar centred at the top of the work area, default 1720 × 380
-  logical pixels (Settings: 900–3840 × 300–800, clamped to the work area).
-  Columns: task list (drawn panel, click to edit, New task field), job cards
-  (content window, horizontal scroll), status column, notes column (search,
-  `#` tag filter, `+`), and an arrow strip that collapses the notes column and
-  shrinks the bar; `window.notes_collapsed` persists it. Side columns narrow
-  before the cards do. Colours: #1B1B1B frame, #202020 panels, #171717 wells.
-  Headings, tags and job names use the bitmap font in `pixel_font.hpp`.
-  The bar uses tool-window flags and has no window controls. Opening from the
-  tray hides on deactivation; opening by hotkey keeps it topmost and open
-  across focus changes until toggled or hidden. Escape backs out of the
-  current view before hiding the bar. Notes, tasks, Settings, note pages and
-  the tag picker open in the middle column in place of the cards.
+- UI: a wide bar centred at the top of the work area, default 1720 x 380 logical
+  pixels (Settings: 900-3840 x 300-800, clamped to the work area), sized from the
+  scale of the monitor it opens on. A strip along the top holds the status, its
+  message, the one line of feedback, the lease and quiet timer, and SETTINGS. Below
+  it: the agents list (content window), then tasks and notes (drawn panels, click to
+  open), then an arrow strip that collapses the notes and shrinks the bar;
+  `window.notes_collapsed` persists it. Side columns narrow before the list does.
+  Colours are flat near-black tokens at the top of `ui.cpp`; colour only means state.
+  Headings and job names use the bitmap font in `pixel_font.hpp`. The bar uses
+  tool-window flags and has no window controls. Opening from the tray hides on
+  deactivation and opens on the tray's monitor; the shortcut keeps it topmost and
+  open across focus changes and opens on the pointer's monitor. Escape backs out of
+  the current view before hiding the bar. Notes, tasks, Settings, note pages and the
+  tag picker open in the first column in place of the list.
+- Edits sit inside drawn fields: call `place()` during layout, and `draw_fields` draws
+  each box and shows which one has the keyboard. Placeholder text is drawn by Knock,
+  because the system's is too dark on this background.
 - Requests require a chat label. Yes, No, and custom replies are persisted.
   Only trusted UI calls may resolve requests. A custom reply never grants input.
 - Custom replies have up to 12 saved presets, managed in Settings → More.
   Choosing a preset only fills the editor; SEND submits the reply.
-- Manual presence has its own column: At PC, Away, Busy, plus an optional
+- Manual presence is in the strip: At PC, Away, Busy, plus an optional
   500-byte UTF-8 message (edit 45). Clicking a state saves it with the message;
   Enter, leaving the box, hiding and a 1.5 s pause after typing save a changed
   message when a state is set. Incoming events never replace a message being
@@ -51,15 +55,20 @@ is required. Saved data remains under `%LOCALAPPDATA%\Knock`.
 - A persisted quiet deadline suppresses banners for 15/30/60 minutes without
   resolving requests or extending expiry. The app clears the deadline and sends
   one inbox summary when the timer ends. Right-click or the tray menu controls
-  the timer; its status is shown in the status column and in the tray tooltip.
+  the timer; its status is shown in the strip and in the tray tooltip.
   The stored preference remains busy_until for compatibility; the interface
   calls it Quiet to distinguish it from manual Busy presence.
-- Job cards group requests, jobs/notices and the finished inbox by chat label.
-  WAITING (pending requests, oldest first, YES/CUSTOM/NO) sorts first, then
-  WORKING (latest result or answer, COPY/VIEW LOG or RELEASE INPUT), then DONE
-  (`knock done` summary, COPY REPORT). A card is DONE while its done record is
-  newer than its other activity. Dismissing a card archives its finished items.
-  Each card's character comes from `make_character(chat)` in `character.cpp`.
+- Agent rows group check-ins, requests, jobs/notices and the finished inbox by chat
+  label (`build_cards`). WAITING (pending requests, YES/CUSTOM/NO) sorts first, then
+  WORKING (check-in title and status, or latest result or answer; COPY/VIEW LOG or
+  RELEASE INPUT), newest start first so updates never reorder the list. A row is DONE
+  while its done record is newer than its other activity; DONE rows live in the closed
+  Done section (summary, COPY REPORT), newest first. Dismissing a row archives its
+  finished items and check-in. The content window's text lists the rows in order, for
+  screen readers and the UI tests. Each row's character comes from
+  `make_character(chat)` in `character.cpp`.
+- `knock start` and `knock update` keep one check-in per chat in the optional `agents`
+  list. A state file without it opens unchanged and is not rewritten for it.
 - `knock done` stores a plain-text summary (terminal codes stripped), an
   absolute report path, and marks matching tasks done; one record per chat.
   `knock inbox` pages the records. Existing commands' JSON is unchanged.
@@ -144,6 +153,8 @@ is required. Saved data remains under `%LOCALAPPDATA%\Knock`.
 | Global shortcut and capture dialog | `src/hotkey_win.cpp`, `include/knock/hotkey.hpp` |
 | Popup dimensions and shared settings persistence | `src/window_settings.cpp`, `include/knock/window_settings.hpp` |
 | Correctness and integration checks | `tests/` |
+| Running tests beside a live Knock | `tests/isolated_run.cpp`, `tests/test_isolation.hpp` |
+| Screenshots of every screen | `tests/ui_gallery.cpp` |
 
 See README.md for build commands, docs/CLI.md for command usage, and
 docs/AGENT_INSTRUCTIONS.md for the text to give cooperating agents. In the
@@ -167,11 +178,21 @@ in docs/VALIDATION.md. Keep native Linux checks, Windows executables exercised
 under Wine, and actual Windows desktop checks distinct. A successful Wine run
 does not establish how the Windows shell will behave.
 
-Real Windows 11 notification delivery/click behavior, actual taskbar rendering,
-Start-menu/focus behavior for the pinned popup, multi-monitor placement, and
-high-DPI behavior remain desktop acceptance checks. Do not turn Wine results
-into a claim that those Windows shell cases were tested.
-`tests/cli_smoke.ps1` is available for native Windows verification.
+Real Windows 11 notification delivery/click behavior and Start-menu/focus behavior for
+the pinned window remain desktop acceptance checks; VALIDATION.md says what the 0.8.0
+desktop session covered.
+
+Real-input tests go on the main monitor: the owner's agents run on the second one, and
+one wrong Esc could stop them, so never send a real Esc key.
+
+Never run a test copy without `KNOCK_DATA_DIR`, and run the GUI tests through
+`isolated_run.exe`. A private window station has its own clipboard and no tray or
+shell, and `IsWindowVisible` is always false there because its desktop window is never
+shown; use `window_shown` instead. Native menus close at once off the real desktop, so
+those copies use the `KNOCK_TEST_MENU` stand-in; `KNOCK_TEST_DPI` draws at a chosen
+scale without changing the display. Those switches only work with `KNOCK_DATA_DIR` set.
+`tests/cli_smoke.ps1` is available for native Windows verification; run it through
+`isolated_run.exe`.
 
 Future work should follow desktop feedback and stay within the existing local
 tray-app scope. AI providers, automatic chat resumption, cloud services, and

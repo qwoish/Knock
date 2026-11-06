@@ -1,4 +1,5 @@
 #include "knock/note_images.hpp"
+#include "test_isolation.hpp"
 
 #include <objidl.h>
 #include <gdiplus.h>
@@ -23,7 +24,6 @@ struct Fixture {
     HWND window = nullptr;
     std::filesystem::path directory;
     Fixture() {
-        require(!FindWindowW(L"Knock.Tray.v1", nullptr), "Close Knock before running the clipboard test.");
         window = CreateWindowExW(0, L"STATIC", L"Knock image tests", WS_POPUP, 0, 0, 10, 10, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
         require(window != nullptr, "Could not create clipboard owner");
         wchar_t temporary[MAX_PATH]{};
@@ -221,6 +221,7 @@ void check_rejections(Fixture& fixture) {
 } // namespace
 
 int main() {
+    if (skip_outside_isolation()) return 77;
     Gdiplus::GdiplusStartupInput options;
     ULONG_PTR token = 0;
     if (Gdiplus::GdiplusStartup(&token, &options, nullptr) != Gdiplus::Ok) return 1;

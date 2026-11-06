@@ -1,8 +1,14 @@
-# Feature tracker — version 0.6.0, plus the top-bar redesign
+# Feature tracker — version 0.8.0
 
 - [x] Windows tray lifecycle and a top-of-screen bar with no taskbar icon flags
-- [x] Bar layout: task list, horizontally scrolling job cards, status column, notes column with search
-- [x] Job cards per chat label with WAITING / WORKING / DONE tags and actions under a text box
+- [x] Window layout: status strip, agents list, tasks column, notes column with search
+- [x] `knock start` check-in and one-line `knock update`; a job that never checked in still appears
+- [x] Agents list per chat label: waiting first, then working newest first; rows keep their place during updates
+- [x] Done section pinned under the list, closed by default, newest first; archived rows stay hidden
+- [x] Clipped row text reads in full on click
+- [x] COPY REPORT confirms on its own button; feedback has one place in the strip and never covers anything
+- [x] A SETTINGS button, as well as the right-click menu
+- [x] Separate instance per KNOCK_DATA_DIR, and GUI tests that run beside a live Knock (`isolated_run`)
 - [x] Pixel-art character generated per job name (deterministic, no image files) and a bitmap heading font
 - [x] Notes column collapses with the arrow; the choice persists
 - [x] `knock done` finished inbox: clean summary, absolute report path, matching task marked done
@@ -10,19 +16,18 @@
 - [x] Permission request Yes / No / Custom
 - [x] Saved custom-reply presets with add/edit/delete in Settings; selection never sends or approves
 - [x] Manual At PC / Away / Busy status, optional message, persistent across restarts; unset until first selection
-- [x] Status column: one click saves At PC / Away / Busy with the optional message
+- [x] Status strip: one click saves At PC / Away / Busy with the optional message
 - [x] Read-only `knock presence`, presence in status/request responses, GUI-only updates
 - [x] Ordinary requests return pending immediately on Away/Busy; existing waits wake without granting permission
 - [x] Explicit `result --wait` retains its chosen budget regardless of presence
 - [x] Quiet notification timer for 15/30/60 minutes, persisted across restarts, with one inbox summary when it ends
-- [x] Waiting cards first, then working, then finished
 - [x] Blocking CLI results, timeouts, cancellation, exclusive input lease
 - [x] Background command runner, captured output, completion notice and Copy
 - [x] Persistent tasks and personal conversation notes
 - [x] Account-scoped named pipe with explicit access control
 - [x] Bundled pixel assets and optional GIF loading
 - [x] Original animated GIFs bundled (decoder kept and tested; no longer drawn)
-- [x] Thin one-logical-pixel scroll thumbs with usable drag targets
+- [x] Thin scroll thumbs with usable drag targets
 - [x] Personal-note tag selector, custom tags, and tag/Untagged filtering
 - [x] Separate note title/description editing and conversation history
 - [x] Cleared title stays blank through background saves; save/navigation requires a title
@@ -45,7 +50,7 @@
 - [x] Atomic shortcut settings and registration-conflict rollback
 - [x] Right-click anywhere in the popup for Settings and Hide Knock
 - [x] Settings page with shortcut capture/disable and Start with Windows
-- [x] Configurable popup size: 360–800 × 360–1000 logical pixels; reset to 420 × 510
+- [x] Configurable window size: 900–3840 × 300–800 logical pixels; reset to 1720 × 380
 - [x] Atomic window-size settings preserve shortcut and unrelated preferences
 - [x] Settings → More for saved replies, quiet timers and Trash retention
 - [x] Hotkey opens a persistent topmost popup; ordinary tray opening hides on click-away
@@ -58,13 +63,14 @@
 ## Desktop acceptance still required
 
 - [ ] Real Windows 11 notification display and click-to-open
-- [ ] Real Windows taskbar/tray behavior, including Explorer restart
+- [ ] Real Windows taskbar/tray behavior, including Explorer restart and a real tray click
 - [ ] Real Windows Start-menu and focus changes while the hotkey-opened popup stays on top
-- [ ] Multiple monitors, alternate taskbar placement, and 125–200% display scaling
+- [x] Two monitors at real 100, 125 and 150% display scaling
+- [ ] Alternate taskbar placement, and 175–200% display scaling
 - [x] Bundled animated GIF files decoded and exercised under Wine/GDI+
 
 Implementation is complete for these paths; the unchecked items need the target
-desktop. Wine results are documented separately in
+desktop. Results are documented separately in
 VALIDATION.md.
 
 Imported image files are retained when an attachment, message, or note is

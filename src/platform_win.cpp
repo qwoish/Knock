@@ -3,6 +3,8 @@
 #include <sddl.h>
 #include <shlobj.h>
 
+#include <cstdint>
+#include <cwchar>
 #include <limits>
 #include <stdexcept>
 
@@ -153,8 +155,32 @@ std::wstring user_identity() {
     return identity + L"." + std::to_wstring(session);
 }
 
+std::wstring instance_tag() {
+    auto folder = environment_value(L"KNOCK_DATA_DIR");
+    if (folder.empty()) return {};
+    auto path = std::filesystem::absolute(std::filesystem::path(folder)).lexically_normal().wstring();
+    while (path.size() > 3 && (path.back() == L'\\' || path.back() == L'/')) path.pop_back();
+    CharLowerBuffW(path.data(), static_cast<DWORD>(path.size()));
+    std::uint64_t hash = 14695981039346656037ull; // FNV-1a over the UTF-16 path.
+    for (const wchar_t unit : path) {
+        hash ^= static_cast<std::uint64_t>(unit);
+        hash *= 1099511628211ull;
+    }
+    wchar_t tag[24]{};
+    swprintf_s(tag, L".%016llx", static_cast<unsigned long long>(hash));
+    return tag;
+}
+
 std::wstring pipe_name() {
-    return L"\\\\.\\pipe\\Knock.v1." + user_identity();
+    return L"\\\\.\\pipe\\Knock.v1." + user_identity() + instance_tag();
+}
+
+std::wstring tray_window_class() {
+    return L"Knock.Tray.v1" + instance_tag();
+}
+
+std::wstring app_lock_name() {
+    return L"Local\\Knock.Tray.v1." + user_identity() + instance_tag();
 }
 
 std::wstring quote_argument(std::wstring_view argument) {
@@ -200,7 +226,8 @@ std::wstring command_line(const std::vector<std::wstring>& arguments) {
 }
 
 bool start_tray(bool show) {
-    if (const HWND window = FindWindowW(L"Knock.Tray.v1", nullptr)) {
+    const auto window_class = tray_window_class();
+    if (const HWND window = FindWindowW(window_class.c_str(), nullptr)) {
         if (show) {
             DWORD process_id = 0;
             GetWindowThreadProcessId(window, &process_id);

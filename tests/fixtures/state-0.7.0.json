@@ -1,0 +1,282 @@
+{
+  "inbox": [
+    {
+      "chat": "UI-1",
+      "created_at": 1794005791405,
+      "finished_at": 1794005791405,
+      "id": "1a1b313f2ad-f7cc0863fcb59e6f-33",
+      "report": "C:\\Projects\\r.md",
+      "status": "done",
+      "summary": "Polish done.\nAll checks passed.",
+      "tasks_completed": [
+        "1a1b313f284-efe5e833491bef8a-23"
+      ],
+      "updated_at": 1794005791405
+    },
+    {
+      "archived": true,
+      "chat": "SITE-1",
+      "created_at": 1794005791409,
+      "finished_at": 1794005791409,
+      "id": "1a1b313f2b1-8f59c9bcd38cee1f-35",
+      "report": "",
+      "status": "done",
+      "summary": "Old job.",
+      "tasks_completed": [],
+      "updated_at": 1794005791409
+    }
+  ],
+  "jobs": [
+    {
+      "chat": "BUILD-1",
+      "command": "cmake --build build",
+      "created_at": 1794005791322,
+      "cwd": "C:\\Projects\\Current",
+      "exit_code": null,
+      "id": "1a1b313f25a-ec6de5e5d2cab6b-13",
+      "log_path": "",
+      "output_tail": "",
+      "resume_text": "",
+      "status": "running",
+      "title": "Release build",
+      "worker_pid": 4242
+    },
+    {
+      "chat": "BUILD-2",
+      "command": "ctest",
+      "created_at": 1794005791330,
+      "cwd": "C:\\Projects\\Current",
+      "exit_code": 0,
+      "finished_at": 1794005791334,
+      "id": "1a1b313f262-e9a7c645876a48b7-16",
+      "log_path": "",
+      "output_tail": "100% tests passed",
+      "resume_text": "",
+      "status": "completed",
+      "title": "Tests",
+      "worker_pid": 0
+    },
+    {
+      "chat": "BUILD-3",
+      "command": "lint",
+      "created_at": 1794005791338,
+      "cwd": "C:\\Projects\\Current",
+      "exit_code": 3,
+      "finished_at": 1794005791343,
+      "id": "1a1b313f26a-6d353a146cfd870-19",
+      "log_path": "",
+      "output_tail": "3 problems",
+      "resume_text": "",
+      "status": "failed",
+      "title": "Lint",
+      "worker_pid": 0
+    },
+    {
+      "chat": "RENDER-1",
+      "command": "",
+      "created_at": 1794005791347,
+      "cwd": "",
+      "exit_code": 0,
+      "finished_at": 1794005791347,
+      "id": "1a1b313f273-61f201fada2928ea-1c",
+      "log_path": "",
+      "output_tail": "",
+      "resume_text": "@RENDER-1: continue",
+      "status": "notice",
+      "title": "Render finished.",
+      "worker_pid": 0
+    }
+  ],
+  "lease": null,
+  "notes": [
+    {
+      "body": "A description.",
+      "created_at": 1794005791368,
+      "id": "1a1b313f288-2d81c62bdcc33a2a-25",
+      "messages": [
+        {
+          "append_payload": {
+            "images": [],
+            "text": "First thought."
+          },
+          "client_id": "0123456789abcdef0123456789abcdef",
+          "created_at": 1794005791373,
+          "edited_at": 1794005791382,
+          "id": "1a1b313f28d-4125a22c4420ed-27",
+          "images": [],
+          "revision": 1,
+          "text": "First thought, edited."
+        },
+        {
+          "created_at": 1794005791377,
+          "id": "1a1b313f291-aad9e4f59e338bb8-29",
+          "images": [],
+          "revision": 0,
+          "text": "Second thought\nwith a line break."
+        }
+      ],
+      "tags": [
+        "Ideas",
+        "旅行"
+      ],
+      "title": "Project ideas",
+      "updated_at": 1794005791382
+    },
+    {
+      "body": "",
+      "created_at": 1794005791386,
+      "id": "1a1b313f29a-dcf556ba2b1bfaa3-2c",
+      "messages": [],
+      "tags": [],
+      "title": "Empty note",
+      "updated_at": 1794005791386
+    }
+  ],
+  "preferences": {
+    "busy_until": 0,
+    "saved_replies": [
+      "Later, please.",
+      "Continue with headless tests."
+    ],
+    "trash_retention_days": 45
+  },
+  "presence": {
+    "message": "Out for coffee.",
+    "state": "away",
+    "updated_at": 1794005791423
+  },
+  "requests": [
+    {
+      "chat": "AUDIO-1",
+      "created_at": 1794005791263,
+      "expires_at": 4102444800000,
+      "id": "1a1b313f220-fca83f88684be779-1",
+      "kind": "input",
+      "lease_seconds": 300,
+      "lease_until": 0,
+      "message": "May I use the mouse and keyboard? — café 日本語",
+      "response": "",
+      "status": "pending"
+    },
+    {
+      "chat": "AUDIO-2",
+      "created_at": 1794005791267,
+      "expires_at": 4102444800000,
+      "id": "1a1b313f223-11323a622cf0b0d1-3",
+      "kind": "question",
+      "lease_seconds": 300,
+      "lease_until": 0,
+      "message": "Keep the old mixer?",
+      "response": "",
+      "status": "pending"
+    },
+    {
+      "archived": true,
+      "chat": "EDIT-1",
+      "created_at": 1794005791272,
+      "expires_at": 1794006391272,
+      "id": "1a1b313f228-fa93da12f75a2ff9-5",
+      "kind": "input",
+      "lease_seconds": 120,
+      "lease_until": 0,
+      "message": "Input for drag tests?",
+      "resolved_at": 1794005791280,
+      "response": "No",
+      "status": "denied"
+    },
+    {
+      "chat": "EDIT-2",
+      "created_at": 1794005791288,
+      "expires_at": 1794006391288,
+      "id": "1a1b313f238-3bc1c78cc36d5d-8",
+      "kind": "input",
+      "lease_seconds": 300,
+      "lease_until": 0,
+      "message": "Input for scroll tests?",
+      "resolved_at": 1794005791293,
+      "response": "Not now. Continue with headless tests.",
+      "status": "custom"
+    },
+    {
+      "chat": "EDIT-3",
+      "created_at": 1794005791297,
+      "expires_at": 1794006391297,
+      "id": "1a1b313f241-9b0b4d68ce127c88-b",
+      "kind": "input",
+      "lease_seconds": 300,
+      "lease_until": 0,
+      "message": "Never mind.",
+      "resolved_at": 1794005791301,
+      "response": "",
+      "status": "cancelled"
+    },
+    {
+      "chat": "EDIT-4",
+      "created_at": 1794005791305,
+      "expires_at": 1794006391305,
+      "id": "1a1b313f249-a279e92b43f3aa20-e",
+      "kind": "input",
+      "lease_seconds": 60,
+      "lease_until": 1794005851310,
+      "message": "Input for one check?",
+      "release_reason": "released",
+      "released_at": 1794005791314,
+      "resolved_at": 1794005791310,
+      "response": "Yes",
+      "status": "released"
+    }
+  ],
+  "schema": 1,
+  "tasks": [
+    {
+      "body": "",
+      "created_at": 1794005791350,
+      "id": "1a1b313f276-fedb620791791eb0-1e",
+      "operator": "AUDIO-1",
+      "project": "CURRENT",
+      "status": "todo",
+      "title": "AUDIO-1: mixer tests",
+      "updated_at": 1794005791350
+    },
+    {
+      "body": "Ask about the fonts.",
+      "created_at": 1794005791354,
+      "id": "1a1b313f27b-39409c1c27774d26-20",
+      "operator": "ME",
+      "project": "",
+      "status": "in_progress",
+      "title": "Licence question",
+      "updated_at": 1794005791359
+    },
+    {
+      "body": "",
+      "created_at": 1794005791364,
+      "id": "1a1b313f284-efe5e833491bef8a-23",
+      "operator": "UI-1",
+      "project": "",
+      "status": "done",
+      "title": "UI-1: polish",
+      "updated_at": 1794005791405
+    }
+  ],
+  "trash": [
+    {
+      "body": "",
+      "created_at": 1794005791391,
+      "deleted_at": 4102444800000,
+      "id": "1a1b313f29f-44e53ae33d45ac47-2e",
+      "messages": [
+        {
+          "created_at": 1794005791395,
+          "id": "1a1b313f2a3-4828b57ae271071a-30",
+          "images": [],
+          "revision": 0,
+          "text": "Kept in Trash."
+        }
+      ],
+      "tags": [],
+      "title": "Deleted note",
+      "updated_at": 1794005791395
+    }
+  ]
+}

@@ -10,8 +10,11 @@ $fixture = Join-Path $build 'runner_fixture.exe'
 if (-not (Test-Path $cli) -or -not (Test-Path $fixture)) {
     throw 'Build knock.exe and runner_fixture.exe before running this test.'
 }
-if (Get-Process KnockTray -ErrorAction SilentlyContinue) {
-    throw 'Exit Knock from its tray menu before running this isolated smoke test.'
+# KNOCK_DATA_DIR makes this copy a separate instance, so a running Knock is safe.
+# Run this through isolated_run.exe to keep its tray off the real desktop.
+function Stop-OwnTray {
+    Get-Process KnockTray -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -eq (Join-Path $build 'KnockTray.exe') } | Stop-Process -Force
 }
 $previousData = $env:KNOCK_DATA_DIR
 $testData = Join-Path $env:TEMP ('knock-smoke-' + [Guid]::NewGuid().ToString('N'))
@@ -116,7 +119,7 @@ try {
     if ($job.output_tail -notlike '*TAIL_SENTINEL*') { throw 'Output tail was lost after log cap.' }
 
     $survivor = Invoke-Knock -Arguments @('run', '--chat', 'TEST-1', '--title', 'Independent worker test', '--', $fixture, 'wait')
-    Get-Process KnockTray | Stop-Process -Force
+    Stop-OwnTray
     Start-Sleep -Seconds 3
     $job = Wait-JobResult -Id $survivor.job.id
     Assert-Equal $job.status 'completed' 'Worker survives tray exit'
@@ -128,9 +131,21 @@ try {
     Assert-Equal $conversation.note.messages[0].id $firstMessage.message.id 'First message survives restart'
     Assert-Equal $conversation.note.messages[1].text $messageText 'Unicode message survives restart'
 
+    $start = Invoke-Knock -Arguments @('start', '--chat', 'SMOKE-1', '--title', 'Checking in', '--report', 'report.md')
+    Assert-Equal $start.agent.status 'working' 'Check-in shows as working'
+    if (-not [IO.Path]::IsPathRooted($start.agent.report)) { throw 'Check-in report path is not absolute.' }
+    $update = Invoke-Knock -Arguments @('update', '--chat', 'SMOKE-1', '--status', 'Running the checks')
+    Assert-Equal $update.agent.status_text 'Running the checks' 'Status line'
+    Assert-Equal $update.agent.id $start.agent.id 'Status keeps the same record'
+    $done = Invoke-Knock -Arguments @('done', '--chat', 'SMOKE-1', '--summary', 'Finished.')
+    Assert-Equal $done.done.report $start.agent.report 'done uses the report named at check-in'
+    $inbox = Invoke-Knock -Arguments @('inbox', '--limit', '5')
+    Assert-Equal @($inbox.inbox | Where-Object { $_.chat -eq 'SMOKE-1' }).Count 1 'Finished job is in the inbox'
+    $null = Invoke-Knock -Arguments @('start', '--chat', 'SMOKE-1') -ExpectedExit 5
+
     Write-Host 'CLI smoke checks passed.'
     Write-Host "Test data: $testData"
 } finally {
-    Get-Process KnockTray -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq (Join-Path $build 'KnockTray.exe') } | Stop-Process -Force
+    Stop-OwnTray
     $env:KNOCK_DATA_DIR = $previousData
 }

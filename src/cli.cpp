@@ -27,6 +27,8 @@ constexpr std::string_view help_text = R"(Knock — a local inbox for your agent
   knock run --chat AUDIO-1 [--title "Build"] [--cwd DIRECTORY] -- PROGRAM ARGS...
   knock job JOB_ID
   knock jobs [--offset 0] [--limit 50]
+  knock start --chat AUDIO-1 --title "What this job is" [--report PATH]
+  knock update --chat AUDIO-1 --status "What it is doing now"
   knock done --chat AUDIO-1 --summary "What was done" [--report PATH] [--task TASK_ID]
   knock inbox [--offset 0] [--limit 50]
   knock tasks list [--offset 0] [--limit 50]
@@ -42,7 +44,8 @@ constexpr std::string_view help_text = R"(Knock — a local inbox for your agent
   knock notes remove ID
 
 Text can also come from UTF-8 files: --message-file, --body-file, --resume-file,
---summary-file. done marks the chat finished and completes its matching task.
+--summary-file. start shows the chat as working from that moment; done marks it
+finished and completes its matching task.
 Repeat --tag for multiple note labels; supplying tags replaces the selection.
 Notes are personal conversations. Add/update --body edits the description;
 append adds a message. Get returns a bounded, oldest-first message page.
@@ -341,6 +344,28 @@ int run_cli(const std::vector<std::wstring>& arguments) {
         require_text(options.title, "--title", 160);
         if (!std::filesystem::is_directory(options.directory)) throw std::runtime_error("--cwd is not an existing directory");
         return output(start_job(options));
+    }
+    if (action == L"start") {
+        parsed.allow({L"--chat", L"--title", L"--report"});
+        const auto chat = parsed.text(L"--chat");
+        const auto title = parsed.text(L"--title");
+        require_text(chat, "--chat", 64);
+        require_text(title, "--title", 160);
+        Json command{{"op", "agent.start"}, {"chat", chat}, {"title", title}, {"report", ""}};
+        if (parsed.has(L"--report")) {
+            const auto report = parsed.wide(L"--report");
+            if (report.empty()) throw std::runtime_error("--report must not be empty");
+            command["report"] = narrow(std::filesystem::absolute(report).wstring());
+        }
+        return output(send_command(command));
+    }
+    if (action == L"update") {
+        parsed.allow({L"--chat", L"--status"});
+        const auto chat = parsed.text(L"--chat");
+        const auto status = parsed.text(L"--status");
+        require_text(chat, "--chat", 64);
+        require_text(status, "--status", 160);
+        return output(send_command({{"op", "agent.update"}, {"chat", chat}, {"status", status}}));
     }
     if (action == L"done") {
         parsed.allow({L"--chat", L"--summary", L"--summary-file", L"--report", L"--task"});

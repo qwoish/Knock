@@ -5,6 +5,23 @@ Use the full path to `knock.exe` if it is not on PATH. `knock help` lists syntax
 Help and info work without the tray app; other commands return one JSON object.
 Use a stable, unique `--chat` label, such as `AUDIO-1`, for this conversation.
 
+## Check in when you start
+
+```text
+knock start --chat AUDIO-1 --title "Add the mixer tests" --report "C:\Projects\Current\report.md"
+```
+
+The person's list shows you as working from that moment. `--report` is optional;
+`knock done` uses that path if it names none. While you work you can replace one
+line saying what you are doing now, for example before a long step. Do this
+rarely; it is not a heartbeat.
+
+```text
+knock update --chat AUDIO-1 --status "Running the mixer tests"
+```
+
+Both print the record and the person's `presence`, and neither grants input.
+
 ## Ask before using desktop input
 
 Before moving the mouse, clicking, scrolling, or typing for interface tests:
@@ -104,11 +121,13 @@ commands that will not ask for a password or terminal response.
 
 ## Report when the job is finished
 
-When the whole job is complete, report it once so the person sees a DONE card:
+When the whole job is complete, report it once:
 
 ```text
 knock done --chat AUDIO-1 --summary "What changed, what was checked, anything left." --report "C:\Projects\Current\report.md"
 ```
+
+This moves you from working to the Done section of the person's list.
 
 Write the summary as plain text (or use `--summary-file`); colour codes are
 removed. `--report` is optional and stored as an absolute path. Tasks for this

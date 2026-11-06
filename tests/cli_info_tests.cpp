@@ -152,6 +152,8 @@ void command_contracts_are_unchanged() {
                          std::pair{Json{{"ok", true}, {"items", Json::array({item})}, {"total", 1}, {"next_offset", nullptr}},
                                    Json{{"ok", true}, {key, Json::array({item})}, {"total", 1}, {"next_offset", nullptr}}}};
     };
+    const Json agent{{"id", "a1"}, {"chat", "UI-1"}, {"title", "Redesign the window"}, {"status", "working"},
+                     {"status_text", ""}, {"report", ""}, {"started_at", 5}, {"updated_at", 5}};
     const Json failure{{"ok", false}, {"error", "not_found: zz"}};
     const Json status{{"ok", true}, {"requests_pending", 0}, {"jobs_running", 0}, {"tasks_todo", 1},
                       {"notes", 0}, {"lease", nullptr}, {"presence", presence}};
@@ -231,6 +233,15 @@ void command_contracts_are_unchanged() {
             {{{"op", "done"}, {"chat", "UI-1"}, {"summary", "All checks passed."}, {"report", ""}, {"task", "t1"}}},
             {{{"ok", true}, {"done", done}}}, {{"ok", true}, {"done", done}}, 0},
         {"inbox", {L"inbox"}, {inbox_command}, {inbox_io.first}, inbox_io.second, 0},
+        {"start", {L"start", L"--chat", L"UI-1", L"--title", L"Redesign the window"},
+            {{{"op", "agent.start"}, {"chat", "UI-1"}, {"title", "Redesign the window"}, {"report", ""}}},
+            {{{"ok", true}, {"agent", agent}, {"presence", presence}}}, {{"ok", true}, {"agent", agent}, {"presence", presence}}, 0},
+        {"start refused", {L"start", L"--chat", L"UI-1", L"--title", L"Redesign the window"},
+            {{{"op", "agent.start"}, {"chat", "UI-1"}, {"title", "Redesign the window"}, {"report", ""}}},
+            {failure}, failure, 5},
+        {"update", {L"update", L"--chat", L"UI-1", L"--status", L"Running tests"},
+            {{{"op", "agent.update"}, {"chat", "UI-1"}, {"status", "Running tests"}}},
+            {{{"ok", true}, {"agent", agent}, {"presence", presence}}}, {{"ok", true}, {"agent", agent}, {"presence", presence}}, 0},
     };
     for (const auto& contract : contracts) {
         FakeIpc ipc(contract.responses);
@@ -252,6 +263,15 @@ void command_contracts_are_unchanged() {
         const auto expected = (std::filesystem::current_path() / "report.md").string();
         require(ipc_commands.size() == 1 && ipc_commands[0]["report"] == expected,
                 "done did not send an absolute report path");
+    }
+    {   // start stores the report as an absolute path too.
+        FakeIpc ipc({{{"ok", true}, {"agent", agent}}});
+        Capture capture;
+        require(knock::run_cli({L"start", L"--chat", L"UI-1", L"--title", L"Work", L"--report", L"report.md"}) == 0,
+                "start with a report failed");
+        const auto expected = (std::filesystem::current_path() / "report.md").string();
+        require(ipc_commands.size() == 1 && ipc_commands[0]["report"] == expected,
+                "start did not send an absolute report path");
     }
     {
         FakeIpc ipc({{{"ok", true}}});
@@ -275,13 +295,21 @@ void command_contracts_are_unchanged() {
             {L"done", L"--chat", L"UI-1", L"--summary", L"x", L"--summary-file", L"y"},
             {L"done", L"--chat", L"UI-1", L"--summary", L"x", L"--detach"},
             {L"done", L"--chat", L"UI-1", L"--summary", L"x", L"--report", L""},
-            {L"inbox", L"extra"}, {L"inbox", L"--limit", L"0"}, {L"inbox", L"--chat", L"UI-1"}}) {
+            {L"inbox", L"extra"}, {L"inbox", L"--limit", L"0"}, {L"inbox", L"--chat", L"UI-1"},
+            {L"start"}, {L"start", L"--chat", L"UI-1"}, {L"start", L"--title", L"x"}, {L"start", L"--chat", L"UI-1", L"--title", L""},
+            {L"start", L"--chat", L"UI-1", L"--title", L"x", L"--report", L""},
+            {L"start", L"--chat", L"UI-1", L"--title", L"x", L"--detach"},
+            {L"start", L"--chat", L"UI-1", L"--title", std::wstring(161, L'x')},
+            {L"start", L"--chat", L"UI-1", L"--title", L"x", L"--status", L"y"}, {L"start", L"UI-1"},
+            {L"update"}, {L"update", L"--chat", L"UI-1"}, {L"update", L"--status", L"x"},
+            {L"update", L"--chat", L"UI-1", L"--status", L""}, {L"update", L"--chat", L"UI-1", L"--status", std::wstring(161, L'x')},
+            {L"update", L"--chat", L"UI-1", L"--status", L"x", L"--title", L"y"}}) {
         FakeIpc ipc({});
         Capture capture;
         bool rejected = false;
         try { (void)knock::run_cli(arguments); } catch (const std::runtime_error&) { rejected = true; }
         require(rejected && ipc_commands.empty() && capture.text().empty(),
-                "invalid done or inbox arguments reached IPC");
+                "invalid done, inbox, start or update arguments reached IPC");
     }
 }
 }
@@ -330,7 +358,8 @@ int main() {
                 guide.find("--wait 300") != std::string::npos &&
                 guide.find("does not automatically wake a CLI coding agent") != std::string::npos &&
                 guide.find("Do not poll") != std::string::npos &&
-                guide.find("next_offset") != std::string::npos,
+                guide.find("next_offset") != std::string::npos &&
+                guide.find("knock start --chat") != std::string::npos && guide.find("knock update --chat") != std::string::npos,
                 "Guide is missing a required permission or efficient-waiting rule");
         require(guide.size() < 16 * 1024, "Agent guide grew beyond a small one-call response");
         std::cout << "PASS info and alias include permission, waiting, and bounded-output guidance\n";
@@ -339,7 +368,8 @@ int main() {
         for (const auto& arguments : std::vector<std::vector<std::wstring>>{{}, {L"--help"}, {L"-h"}})
             require(invoke(arguments) == help, "Help aliases differ");
         require(help.find("knock info") != std::string::npos && help.find("knock presence") != std::string::npos &&
-                help.find("knock done") != std::string::npos && help.find("knock inbox") != std::string::npos,
+                help.find("knock done") != std::string::npos && help.find("knock inbox") != std::string::npos &&
+                help.find("knock start") != std::string::npos && help.find("knock update") != std::string::npos,
                 "Short help does not expose info and presence");
         std::cout << "PASS short help points to the embedded agent guide\n";
 

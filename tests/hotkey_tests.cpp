@@ -1,3 +1,4 @@
+#include "test_isolation.hpp"
 #include "knock/hotkey.hpp"
 
 #include <nlohmann/json.hpp>
@@ -165,10 +166,11 @@ void dialog(Context& context) {
 }
 
 int main() {
-    if (FindWindowW(L"Knock.Tray.v1", nullptr)) {
-        std::cout << "SKIP: close Knock before running shortcut tests.\n";
+    if (in_private_window_station()) {
+        std::cout << "SKIP: Windows refuses hotkeys in a private window station; use isolated_run --desktop.\n";
         return 77;
     }
+    if (skip_outside_isolation(true)) return 77;
     try {
         validation();
         Context context;
