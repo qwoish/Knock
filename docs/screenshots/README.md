@@ -11,3 +11,4 @@ screen this way. See VALIDATION.md for how each was taken.
 | `agents-125.png` | The same at 125% |
 | `agents-150.png` | The same at 150% |
 | `agents-notes-collapsed.png` | 100% with the notes column tucked away by the arrow |
+| `agents-queue-quiet.png` | 100%: two requests queued behind a lease, and a quiet window open |

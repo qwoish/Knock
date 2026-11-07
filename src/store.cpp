@@ -600,13 +600,141 @@ void deliver(const ChangeCallback& callback, const std::vector<Json>& events) no
     }
 }
 
-bool expire_records(Json& state, std::int64_t now) {
+// The owner's rule: away means the mouse and keyboard are granted, unless the message
+// withholds them. Reading free text can only err one way here: a message that merely
+// looks like a refusal leaves the request with the person, as it always was.
+bool away_grants_input(const Json& presence) {
+    if (presence.value("state", "") != "away") return false;
+    std::set<std::string> words;
+    std::string word;
+    const auto message = ascii_lower(presence.value("message", "")) + " ";
+    for (std::size_t i = 0; i < message.size(); ++i) {
+        const auto byte = static_cast<unsigned char>(message[i]);
+        // An apostrophe, straight or curly, stays inside its word: don't, can't.
+        if (message[i] == '\'') continue;
+        if (message.compare(i, 3, "\xE2\x80\x99") == 0) { i += 2; continue; }
+        if (byte < 0x80 && std::isalnum(byte)) { word.push_back(message[i]); continue; }
+        if (!word.empty()) words.insert(word);
+        word.clear();
+    }
+    const auto any = [&](std::initializer_list<const char*> list) {
+        return std::any_of(list.begin(), list.end(), [&](const char* item) { return words.contains(item); });
+    };
+    if (any({"headless", "withhold", "withheld", "withholding"}) || (words.contains("hands") && words.contains("off")))
+        return false;
+    return !(any({"no", "not", "never", "without", "avoid", "dont", "cant", "cannot", "stop", "ask", "deny", "denied", "wait"}) &&
+             any({"input", "inputs", "mouse", "keyboard", "desktop", "screen", "screens", "touch", "use"}));
+}
+
+void grant_lease(Json& state, Json& request, std::int64_t now) {
+    const auto until = now + request["lease_seconds"].get<std::int64_t>() * 1000;
+    request["lease_until"] = until;
+    state["lease"] = {{"id", request["id"]}, {"chat", request["chat"]}, {"until", until}};
+}
+
+// Moves the line for the mouse and keyboard along when the lease is free. A request
+// that has been waiting its turn goes to the person, or is granted while they are away.
+// Without one of those events the person keeps whatever is already in front of them:
+// a change of presence alone grants nothing.
+std::optional<Json> advance_input_line(Json& state, std::int64_t now, bool lease_ended, bool arrival) {
+    if (!state["lease"].is_null()) return std::nullopt;
+    const auto head = std::find_if(state["requests"].begin(), state["requests"].end(), [](const Json& request) {
+        return request["kind"] == "input" && request["status"] == "pending";
+    });
+    if (head == state["requests"].end()) return std::nullopt;
+    if (!head->value("queued", false) && !lease_ended && !arrival) return std::nullopt;
+    head->erase("queued");
+    if (away_grants_input(state["presence"])) {
+        grant_lease(state, *head, now);
+        (*head)["status"] = "approved";
+        (*head)["response"] = "Away";
+        (*head)["granted_by"] = "away";
+        (*head)["resolved_at"] = now;
+        return event("updated", &*head);
+    }
+    if (arrival) return std::nullopt;
+    return event("request", &*head);
+}
+
+Json quiet_place(const Json& state, const Json& window, std::int64_t now) {
+    std::int64_t wait_ms = 0;
+    std::size_t position = 1, ahead = 0;
+    Json holder;
+    for (const auto& other : state["quiet_windows"]) {
+        if (other["id"] == window["id"]) break;
+        if (other["status"] == "open") {
+            wait_ms += std::max<std::int64_t>(0, other["until"].get<std::int64_t>() - now);
+            holder = other;
+            ++ahead;
+        } else if (other["status"] == "waiting") {
+            wait_ms += other["minutes"].get<std::int64_t>() * 60000;
+            ++position;
+            ++ahead;
+        }
+    }
+    Json place{{"position", position}, {"ahead", ahead}, {"expected_wait_seconds", (wait_ms + 999) / 1000},
+               {"expected_at", now + wait_ms},
+               {"may_expire_first", now + wait_ms > window.value("expires_at", std::numeric_limits<std::int64_t>::max())}};
+    if (!holder.is_null()) {
+        place["holder"] = holder["chat"];
+        place["holder_until"] = holder["until"];
+    }
+    return place;
+}
+
+void open_quiet_window(Json& window, std::int64_t now) {
+    window["status"] = "open";
+    window["opened_at"] = now;
+    window["until"] = now + window["minutes"].get<std::int64_t>() * 60000;
+    window.erase("expires_at");
+}
+
+void end_quiet_window(Json& window, std::int64_t now, const char* reason) {
+    window["status"] = "ended";
+    window["ended_at"] = now;
+    window["end_reason"] = reason;
+    window.erase("expires_at");
+}
+
+// One at a time: when nothing is open, the longest-waiting window opens and its clock
+// starts now, not when it first asked.
+void advance_quiet_line(Json& state, std::int64_t now) {
+    auto& windows = state["quiet_windows"];
+    const bool open = std::any_of(windows.begin(), windows.end(), [](const Json& window) { return window["status"] == "open"; });
+    if (open) return;
+    for (auto& window : windows) {
+        if (window["status"] == "waiting") {
+            open_quiet_window(window, now);
+            return;
+        }
+    }
+}
+
+// Finished windows are only history. Keep a short tail of them, never an open one.
+void trim_quiet_windows(Json& state) {
+    constexpr std::size_t keep = 20;
+    auto& windows = state["quiet_windows"];
+    auto ended = std::count_if(windows.begin(), windows.end(), [](const Json& window) { return window["status"] == "ended"; });
+    for (auto it = windows.begin(); ended > static_cast<std::ptrdiff_t>(keep) && it != windows.end();) {
+        if ((*it)["status"] == "ended") { it = windows.erase(it); --ended; }
+        else ++it;
+    }
+}
+
+// True when a window's time is up, so expiry only saves when something changed.
+bool quiet_window_due(const Json& window, std::int64_t now) {
+    if (window["status"] == "open") return window["until"].get<std::int64_t>() <= now;
+    return window["status"] == "waiting" && window["expires_at"].get<std::int64_t>() <= now;
+}
+
+bool expire_records(Json& state, std::int64_t now, bool* lease_ended = nullptr) {
     bool changed = false;
     for (auto& request : state["requests"]) {
         if (request["status"] == "pending" && request["expires_at"].get<std::int64_t>() <= now) {
             request["status"] = "expired";
             request["resolved_at"] = now;
             request["response"] = "";
+            request.erase("queued");
             changed = true;
         }
     }
@@ -617,6 +745,19 @@ bool expire_records(Json& state, std::int64_t now) {
         request["release_reason"] = "expired";
         state["lease"] = nullptr;
         changed = true;
+        if (lease_ended) *lease_ended = true;
+    }
+    if (state.contains("quiet_windows")) {
+        bool quiet_changed = false;
+        for (auto& window : state["quiet_windows"]) {
+            if (!quiet_window_due(window, now)) continue;
+            end_quiet_window(window, now, window["status"] == "open" ? "expired" : "timed_out");
+            quiet_changed = true;
+        }
+        if (quiet_changed) {
+            advance_quiet_line(state, now);
+            changed = true;
+        }
     }
     if (state.contains("trash")) {
         const auto cutoff = now - state["preferences"]["trash_retention_days"].get<std::int64_t>() * day_ms;
@@ -786,6 +927,34 @@ void validate_state(const Json& state) {
         }
         if (!found) throw std::runtime_error("inconsistent_lease");
     }
+    if (state.contains("quiet_windows")) {
+        const auto& windows = state["quiet_windows"];
+        if (!windows.is_array() || windows.size() > max_records)
+            throw std::runtime_error("invalid_collection: quiet_windows");
+        std::size_t open = 0;
+        for (const auto& window : windows) {
+            if (!window.is_object()) throw std::runtime_error("invalid_record");
+            if (!ids.insert(id_field(window)).second) throw std::runtime_error("duplicate_id");
+            require_fields(window, {"chat", "reason", "minutes", "status", "created_at"});
+            text_field(window, "chat", 64, true);
+            text_field(window, "reason", 160, true);
+            integer_field(window, "minutes", 1, 240, 0, true);
+            integer_field(window, "created_at", 0, INT64_MAX, 0, true);
+            const auto status = text_field(window, "status", 16, true);
+            if (!is_one_of(status, {"open", "waiting", "ended"})) throw std::runtime_error("invalid_quiet_status");
+            if (status == "open") {
+                ++open;
+                integer_field(window, "opened_at", 0, INT64_MAX, 0, true);
+                integer_field(window, "until", 1, INT64_MAX, 0, true);
+            } else if (status == "waiting") {
+                integer_field(window, "expires_at", 0, INT64_MAX, 0, true);
+            } else {
+                integer_field(window, "ended_at", 0, INT64_MAX, 0, true);
+                text_field(window, "end_reason", 16, true);
+            }
+        }
+        if (open > 1) throw std::runtime_error("inconsistent_quiet_windows");
+    }
 }
 
 void atomic_write(const std::filesystem::path& destination, const std::string& bytes) {
@@ -848,6 +1017,56 @@ void atomic_write(const std::filesystem::path& destination, const std::string& b
 }
 } // namespace
 
+Json input_queue_place(const Json& state, const Json& request, std::int64_t now) {
+    if (request.value("kind", "") != "input" || request.value("status", "") != "pending") return nullptr;
+    std::int64_t wait_ms = 0;
+    std::size_t older = 0;
+    const auto& lease = state["lease"];
+    if (!lease.is_null()) wait_ms += std::max<std::int64_t>(0, lease["until"].get<std::int64_t>() - now);
+    for (const auto& other : state["requests"]) {
+        if (other["id"] == request["id"]) break;
+        if (other["kind"] == "input" && other["status"] == "pending") {
+            ++older;
+            wait_ms += other["lease_seconds"].get<std::int64_t>() * 1000;
+        }
+    }
+    const auto ahead = older + (lease.is_null() ? 0 : 1);
+    if (!ahead) return nullptr;
+    Json place{{"position", older + 1}, {"ahead", ahead}, {"expected_wait_seconds", (wait_ms + 999) / 1000},
+               {"expected_at", now + wait_ms},
+               {"may_expire_first", now + wait_ms > request.value("expires_at", std::numeric_limits<std::int64_t>::max())}};
+    if (!lease.is_null()) {
+        place["holder"] = lease["chat"];
+        place["holder_until"] = lease["until"];
+    }
+    return place;
+}
+
+bool input_request_queued(const Json& state, const Json& request) {
+    if (request.value("kind", "") != "input" || request.value("status", "") != "pending") return false;
+    return !state["lease"].is_null() || request.value("queued", false);
+}
+
+Json quiet_window_view(const Json& state, std::int64_t now) {
+    Json view{{"open", false}, {"waiting", 0}};
+    if (!state.contains("quiet_windows")) return view;
+    std::size_t waiting = 0;
+    for (const auto& window : state["quiet_windows"]) {
+        if (window["status"] == "waiting") ++waiting;
+        if (window["status"] != "open") continue;
+        const auto until = window["until"].get<std::int64_t>();
+        view["open"] = true;
+        view["id"] = window["id"];
+        view["chat"] = window["chat"];
+        view["reason"] = window["reason"];
+        view["opened_at"] = window["opened_at"];
+        view["until"] = until;
+        view["remaining_seconds"] = (std::max<std::int64_t>(0, until - now) + 999) / 1000;
+    }
+    view["waiting"] = waiting;
+    return view;
+}
+
 std::int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -893,6 +1112,7 @@ void Store::load() {
     if (!loaded.contains("inbox")) { loaded["inbox"] = Json::array(); dirty = true; }
     // Added in memory only: opening a 0.7.0 state must not rewrite the file.
     if (!loaded.contains("agents")) loaded["agents"] = Json::array();
+    if (!loaded.contains("quiet_windows")) loaded["quiet_windows"] = Json::array();
     if (!loaded.contains("preferences")) { loaded["preferences"] = default_preferences(); dirty = true; }
     if (!loaded.contains("presence")) { loaded["presence"] = default_presence(); dirty = true; }
     const auto defaults = default_preferences();
@@ -932,6 +1152,13 @@ void Store::load() {
     }
     if (!loaded["lease"].is_null()) { loaded["lease"] = nullptr; dirty = true; }
     dirty = expire_records(loaded, now) || dirty;
+    // A restart ends the lease, so the next in line can be answered. Nothing is granted
+    // here: whoever was waiting lost their connection and may not be there any more.
+    for (auto& request : loaded["requests"]) {
+        if (request["kind"] != "input" || request["status"] != "pending") continue;
+        if (request.value("queued", false)) { request.erase("queued"); dirty = true; }
+        break;
+    }
     auto previous = std::move(state_);
     state_ = std::move(loaded);
     try {
@@ -961,6 +1188,11 @@ bool Store::expire_locked() {
             }
         }
     }
+    if (!due) {
+        due = std::any_of(state_["quiet_windows"].begin(), state_["quiet_windows"].end(), [&](const Json& window) {
+            return quiet_window_due(window, now);
+        });
+    }
     if (!due && !state_["trash"].empty()) {
         const auto cutoff = now - state_["preferences"]["trash_retention_days"].get<std::int64_t>() * day_ms;
         due = std::any_of(state_["trash"].begin(), state_["trash"].end(), [&](const Json& note) {
@@ -969,9 +1201,12 @@ bool Store::expire_locked() {
     }
     if (!due) return false;
     auto previous = state_;
-    expire_records(state_, now);
+    bool lease_ended = false;
+    expire_records(state_, now, &lease_ended);
+    auto moved = advance_input_line(state_, now, lease_ended, false);
     try { save_locked(); }
     catch (...) { state_ = std::move(previous); throw; }
+    if (moved) line_events_.push_back(std::move(*moved));
     return true;
 }
 
@@ -991,15 +1226,18 @@ void Store::stop() {
 void Store::tick() {
     ChangeCallback callback;
     bool expired = false;
+    std::vector<Json> events;
     {
         std::lock_guard lock(mutex_);
         if (!loaded_ || stopped_) return;
         expired = expire_locked();
         callback = callback_;
+        events.swap(line_events_);
     }
     if (expired) {
         changed_.notify_all();
-        deliver(callback, {event("updated")});
+        events.insert(events.begin(), event("updated"));
+        deliver(callback, events);
     }
 }
 
@@ -1030,9 +1268,12 @@ Json Store::handle(const Json& command, bool trusted_ui) {
                 if (stopped_) throw std::runtime_error("store_stopped");
                 if (expire_locked()) {
                     const auto changed_callback = callback_;
+                    std::vector<Json> expired{event("updated")};
+                    for (auto& moved : line_events_) expired.push_back(std::move(moved));
+                    line_events_.clear();
                     lock.unlock();
                     changed_.notify_all();
-                    deliver(changed_callback, {event("updated")});
+                    deliver(changed_callback, expired);
                     lock.lock();
                     continue;
                 }
@@ -1041,26 +1282,65 @@ Json Store::handle(const Json& command, bool trusted_ui) {
                     result = {{"ok", true}, {"request", request}};
                     break;
                 }
-                if (stop_when_unavailable &&
+                // Away is no reason to give up a place in the line: the turn will be
+                // granted when it comes. Anything else is the person's to answer.
+                const bool turn_will_be_granted = away_grants_input(state_["presence"]) &&
+                    !input_queue_place(state_, request, now_ms()).is_null();
+                if (stop_when_unavailable && !turn_will_be_granted &&
                     is_one_of(state_["presence"]["state"].get<std::string>(), {"away", "busy"})) {
                     result = {{"ok", true}, {"request", request}, {"wait_reason", "presence"}};
                     break;
                 }
-                const auto remaining = std::max<std::int64_t>(1, request["expires_at"].get<std::int64_t>() - now_ms());
+                const auto now = now_ms();
+                auto remaining = std::max<std::int64_t>(1, request["expires_at"].get<std::int64_t>() - now);
+                if (!state_["lease"].is_null())
+                    remaining = std::min(remaining, std::max<std::int64_t>(1, state_["lease"]["until"].get<std::int64_t>() - now));
+                const auto wake = std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(remaining));
+                changed_.wait_until(lock, wake);
+            }
+        } else if (op == "quiet.wait") {
+            const auto id = id_field(command);
+            const auto seconds = integer_field(command, "wait_seconds", 1, 86400, 86400);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
+            for (;;) {
+                if (stopped_) throw std::runtime_error("store_stopped");
+                if (expire_locked()) {
+                    const auto changed_callback = callback_;
+                    std::vector<Json> expired{event("updated")};
+                    for (auto& moved : line_events_) expired.push_back(std::move(moved));
+                    line_events_.clear();
+                    lock.unlock();
+                    changed_.notify_all();
+                    deliver(changed_callback, expired);
+                    lock.lock();
+                    continue;
+                }
+                const auto& window = find_record(state_["quiet_windows"], id);
+                if (window["status"] != "waiting" || std::chrono::steady_clock::now() >= deadline) {
+                    result = {{"ok", true}, {"quiet", window}};
+                    break;
+                }
+                const auto now = now_ms();
+                auto remaining = std::max<std::int64_t>(1, window["expires_at"].get<std::int64_t>() - now);
+                for (const auto& other : state_["quiet_windows"]) {
+                    if (other["status"] == "open")
+                        remaining = std::min(remaining, std::max<std::int64_t>(1, other["until"].get<std::int64_t>() - now));
+                }
                 const auto wake = std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(remaining));
                 changed_.wait_until(lock, wake);
             }
         } else {
             if (expire_locked()) events.push_back(event("updated"));
-            const bool may_mutate = !is_one_of(op, {"snapshot", "status", "presence.get", "list", "request.result", "job.result", "inbox.result", "note.get", "note.find_message", "note.message.get", "note.trash.list", "note.search", "note.search_locations"});
+            const bool may_mutate = !is_one_of(op, {"snapshot", "status", "presence.get", "list", "request.result", "job.result", "inbox.result", "note.get", "note.find_message", "note.message.get", "note.trash.list", "note.search", "note.search_locations", "quiet.status"});
             Json previous = may_mutate ? state_ : Json();
             bool dirty = false;
             Json notification;
+            std::optional<Json> line_moved;
             try {
                 const auto now = now_ms();
                 if (op == "snapshot") {
                     Json snapshot = Json::object();
-                    for (const auto* field : {"schema", "requests", "jobs", "tasks", "inbox", "agents", "lease", "preferences", "presence"})
+                    for (const auto* field : {"schema", "requests", "jobs", "tasks", "inbox", "agents", "lease", "preferences", "presence", "quiet_windows"})
                         snapshot[field] = state_[field];
                     snapshot["notes"] = Json::array();
                     for (const auto& note : state_["notes"])
@@ -1077,7 +1357,9 @@ Json Store::handle(const Json& command, bool trusted_ui) {
                     validate_preferences(preferences);
                     dirty = state_["preferences"] != preferences;
                     state_["preferences"] = std::move(preferences);
-                    dirty = expire_records(state_, now) || dirty;
+                    bool lease_ended = false;
+                    dirty = expire_records(state_, now, &lease_ended) || dirty;
+                    line_moved = advance_input_line(state_, now, lease_ended, false);
                     result = {{"ok", true}, {"preferences", state_["preferences"]}};
                     notification = event("updated");
                     notification["operation"] = op;
@@ -1107,6 +1389,87 @@ Json Store::handle(const Json& command, bool trusted_ui) {
                               {"tasks_todo", count_status("tasks", "todo")},
                               {"notes", state_["notes"].size()}, {"lease", state_["lease"]},
                               {"presence", state_["presence"]}};
+                    // Who else is on this PC right now, for an agent that is starting.
+                    Json working = Json::array();
+                    for (const auto& agent : state_["agents"]) {
+                        if (agent["status"] != "working" || agent.value("archived", false)) continue;
+                        working.push_back({{"chat", agent["chat"]}, {"title", agent["title"]},
+                                           {"status_text", agent["status_text"]}, {"started_at", agent["started_at"]},
+                                           {"updated_at", agent["updated_at"]}});
+                    }
+                    result["agents"] = std::move(working);
+                    Json line = Json::array();
+                    for (const auto& request : state_["requests"]) {
+                        if (request["kind"] != "input" || request["status"] != "pending") continue;
+                        const auto place = input_queue_place(state_, request, now);
+                        Json item{{"id", request["id"]}, {"chat", request["chat"]}, {"lease_seconds", request["lease_seconds"]}};
+                        if (!place.is_null()) item.update(place);
+                        line.push_back(std::move(item));
+                    }
+                    result["input_queue"] = std::move(line);
+                    result["quiet_window"] = quiet_window_view(state_, now);
+                } else if (op == "quiet.status") {
+                    Json waiting = Json::array();
+                    for (const auto& window : state_["quiet_windows"]) {
+                        if (window["status"] != "waiting") continue;
+                        Json item{{"id", window["id"]}, {"chat", window["chat"]}, {"reason", window["reason"]},
+                                  {"minutes", window["minutes"]}, {"expires_at", window["expires_at"]}};
+                        item.update(quiet_place(state_, window, now));
+                        waiting.push_back(std::move(item));
+                    }
+                    result = {{"ok", true}, {"quiet_window", quiet_window_view(state_, now)}, {"waiting", std::move(waiting)}};
+                } else if (op == "quiet.open") {
+                    const auto chat = text_field(command, "chat", 64, true);
+                    const auto reason = one_line(command, "reason");
+                    const auto minutes = integer_field(command, "minutes", 1, 240, 0, true);
+                    const auto timeout = integer_field(command, "timeout_seconds", 1, 86400, 1800);
+                    auto& windows = state_["quiet_windows"];
+                    // Asking again keeps the place and the clock, so a dropped wait can
+                    // be picked up with the same command.
+                    const auto mine = std::find_if(windows.begin(), windows.end(), [&](const Json& window) {
+                        return window["chat"] == chat && window["status"] != "ended";
+                    });
+                    if (mine != windows.end()) {
+                        result = {{"ok", true}, {"quiet", *mine}, {"already", true}};
+                    } else {
+                        room_for_record(windows);
+                        Json window{{"id", make_id()}, {"chat", chat}, {"reason", reason}, {"minutes", minutes},
+                                    {"created_at", now}, {"status", "waiting"}, {"expires_at", now + timeout * 1000}};
+                        const bool taken = std::any_of(windows.begin(), windows.end(), [](const Json& other) {
+                            return other["status"] != "ended";
+                        });
+                        if (!taken) open_quiet_window(window, now);
+                        windows.push_back(window);
+                        trim_quiet_windows(state_);
+                        result = {{"ok", true}, {"quiet", window}};
+                        notification = event("updated", &window);
+                        notification["operation"] = op;
+                        dirty = true;
+                    }
+                } else if (op == "quiet.release") {
+                    // Named by id or chat it ends only that one, whether open or still
+                    // waiting. With neither it ends whatever is open.
+                    auto& windows = state_["quiet_windows"];
+                    const bool by_id = command.contains("id"), by_chat = command.contains("chat");
+                    const auto id = by_id ? id_field(command) : std::string();
+                    const auto chat = by_chat ? text_field(command, "chat", 64, true) : std::string();
+                    const auto target = std::find_if(windows.begin(), windows.end(), [&](const Json& window) {
+                        if (window["status"] == "ended") return false;
+                        if (by_id) return window["id"] == id;
+                        if (by_chat) return window["chat"] == chat;
+                        return window["status"] == "open";
+                    });
+                    if (target == windows.end()) {
+                        result = {{"ok", true}, {"quiet", nullptr}};
+                    } else {
+                        end_quiet_window(*target, now, (*target)["status"] == "open" ? "released" : "cancelled");
+                        Json ended = *target;
+                        advance_quiet_line(state_, now);
+                        result = {{"ok", true}, {"quiet", ended}};
+                        notification = event("updated", &ended);
+                        notification["operation"] = op;
+                        dirty = true;
+                    }
                 } else if (op == "list") {
                     result = list_records(state_, command);
                 } else if (op == "note.trash.list") {
@@ -1345,9 +1708,21 @@ Json Store::handle(const Json& command, bool trusted_ui) {
                         {"created_at", now}, {"expires_at", now + 1000 * integer_field(command, "timeout_seconds", 1, 86400, 1800)},
                         {"status", "pending"}, {"response", ""},
                         {"lease_seconds", integer_field(command, "lease_seconds", 1, 3600, 300)}, {"lease_until", 0}};
+                    // Questions need no input, so they never wait behind a lease.
+                    const bool input = kind == "input";
+                    if (input && !state_["lease"].is_null()) request["queued"] = true;
                     state_["requests"].push_back(request);
-                    result = {{"ok", true}, {"request", request}};
-                    notification = event("request", &request);
+                    if (input && !request.contains("queued") && away_grants_input(state_["presence"])) {
+                        line_moved = advance_input_line(state_, now, false, true);
+                        // An older request took the turn; this one waits behind it.
+                        auto& added = state_["requests"].back();
+                        if (added["status"] == "pending") added["queued"] = true;
+                    }
+                    const auto& added = state_["requests"].back();
+                    result = {{"ok", true}, {"request", added}};
+                    // The person hears about a queued request when its turn comes, and
+                    // about a granted one only by seeing who holds the lease.
+                    notification = event(input && (added.contains("queued") || added["status"] != "pending") ? "updated" : "request", &added);
                     dirty = true;
                 } else if (op == "request.result") {
                     result = {{"ok", true}, {"request", find_record(state_["requests"], id_field(command))}};
@@ -1361,15 +1736,17 @@ Json Store::handle(const Json& command, bool trusted_ui) {
                         : (decision == "approved" ? std::string("Yes") : std::string("No"));
                     if (decision == "approved" && request["kind"] == "input") {
                         if (!state_["lease"].is_null()) throw std::runtime_error("input_busy");
-                        const auto until = now + request["lease_seconds"].get<std::int64_t>() * 1000;
-                        request["lease_until"] = until;
-                        state_["lease"] = {{"id", request["id"]}, {"chat", request["chat"]}, {"until", until}};
+                        // A request still waiting its turn cannot overtake the line.
+                        if (request.value("queued", false)) throw std::runtime_error("input_queued");
+                        grant_lease(state_, request, now);
                     }
                     request["status"] = decision;
                     request["response"] = response;
                     request["resolved_at"] = now;
+                    request.erase("queued");
                     result = {{"ok", true}, {"request", request}};
                     notification = event("updated", &request);
+                    line_moved = advance_input_line(state_, now, false, false);
                     dirty = true;
                 } else if (op == "request.cancel") {
                     auto& request = find_record(state_["requests"], id_field(command));
@@ -1377,8 +1754,10 @@ Json Store::handle(const Json& command, bool trusted_ui) {
                     request["status"] = "cancelled";
                     request["response"] = "";
                     request["resolved_at"] = now;
+                    request.erase("queued");
                     result = {{"ok", true}, {"request", request}};
                     notification = event("updated", &request);
+                    line_moved = advance_input_line(state_, now, false, false);
                     dirty = true;
                 } else if (op == "request.release") {
                     auto& request = find_record(state_["requests"], id_field(command));
@@ -1392,6 +1771,7 @@ Json Store::handle(const Json& command, bool trusted_ui) {
                         request["released_at"] = now;
                         request["release_reason"] = "released";
                         dirty = true;
+                        line_moved = advance_input_line(state_, now, true, false);
                     }
                     result = {{"ok", true}, {"request", request}};
                     notification = event("updated", &request);
@@ -1522,16 +1902,29 @@ Json Store::handle(const Json& command, bool trusted_ui) {
                 } else {
                     throw std::runtime_error("unknown_operation: " + op);
                 }
-                if (dirty) {
+                if (dirty || line_moved) {
                     save_locked();
-                    events.push_back(std::move(notification));
+                    if (dirty) events.push_back(std::move(notification));
+                    if (line_moved) events.push_back(std::move(*line_moved));
                 }
             } catch (...) {
                 if (may_mutate) state_ = std::move(previous);
                 throw;
             }
         }
-        if (result.contains("request") || result.contains("agent")) result["presence"] = state_["presence"];
+        events.insert(events.end(), line_events_.begin(), line_events_.end());
+        line_events_.clear();
+        const auto now = now_ms();
+        if (result.contains("request") || result.contains("agent") || result.contains("quiet")) {
+            result["presence"] = state_["presence"];
+            result["quiet_window"] = quiet_window_view(state_, now);
+        }
+        if (result.contains("request")) {
+            auto place = input_queue_place(state_, result["request"], now);
+            if (!place.is_null()) result["queue"] = std::move(place);
+        } else if (result.contains("quiet") && result["quiet"].is_object() && result["quiet"]["status"] == "waiting") {
+            result["queue"] = quiet_place(state_, result["quiet"], now);
+        }
     } catch (const std::exception& error) {
         result = {{"ok", false}, {"error", error.what()}};
     } catch (...) {

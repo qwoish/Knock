@@ -1,7 +1,7 @@
 # Validation
 
 The earlier sections retain the original platform and application checks.
-Version-specific additions follow; the latest results are in **Version 0.8** at the end.
+Version-specific additions follow; the latest results are in **Version 0.9** at the end.
 
 ## Windows platform and local IPC
 
@@ -570,3 +570,36 @@ never send a real Esc key.
 
 Screens drawn with `KNOCK_TEST_DPI` are real windows at a forced scale, not display
 scaling. The images in `docs/screenshots` are of that kind.
+
+## Version 0.9
+
+Everything here ran off the desktop: no real mouse or keyboard was used, and Windows
+display settings were not touched.
+
+**Automated, on Windows, under `isolated_run.exe`.** New in `store`: the order of the
+line, place and expected wait, release, refusal, cancel and expiry moving it on, restart,
+the away grant and the messages that withhold it, quiet windows (one at a time, a second
+waits, release, expiry, a waiter giving up, restart, stored validation) and a state from
+0.8.0. New in `cli_info`: `knock quiet` contracts and exit codes, and the live end of
+`knock info` with Knock closed, older and running. New in `agents_ui`: the real
+`knock.exe` against a private `KnockTray` for the same paths, including blocked commands
+woken by a release, QUEUED rows, END QUIET, and every control fitting with a quiet window
+at 96, 120, 144 and 192 DPI at the default and smallest sizes. `cli_smoke.ps1` covers
+`knock quiet` and `knock info` too.
+
+`tests/fixtures/state-0.8.0.json` was written by the store at commit 976ffb0. It and the
+0.7.0 fixture open without the file changing and lose nothing. Run once by hand: the
+stores at 72f4709 and 976ffb0 opened a state written by 0.9.0, and kept its quiet windows
+and queued requests after saving, so going back to an older build is safe.
+
+**Tests changed on purpose.** `existing_outputs_keep_their_shape` now allows the added
+fields; `cli_info` checks that `info` starts with the guide rather than equals it; the
+0.7.0 test also allows `quiet_windows` when it saves; `inbox_ui` clicks At PC before its
+notification-timer checks, because an input request made while Away with no message is
+now granted. That last one is the one behaviour change to an existing command: `knock
+request` while Away used to return `pending`, exit 7.
+
+**Not run on the real desktop.** Everything above in a real session: a real banner when
+a turn comes, real clicks on END QUIET and the QUEUED rows, and real display scaling of
+the new line above the list. The screens in `docs/screenshots/agents-queue-quiet.png` are
+real windows at a forced scale.

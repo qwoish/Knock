@@ -8,6 +8,7 @@
 #include <functional>
 #include <future>
 #include <iostream>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -197,6 +198,8 @@ void state_from_0_7_0_loads_unchanged() {
     auto saved = Json::parse(read_file(path));
     check(saved["agents"].size() == 1, "The check-in was not saved");
     saved.erase("agents");
+    check(saved["quiet_windows"].empty(), "A check-in opened a quiet window");
+    saved.erase("quiet_windows");
     check(saved == expected, "Saving lost or changed 0.7.0 data");
 
     // And it loads again with the check-in, still losing nothing.
@@ -1514,11 +1517,14 @@ void legacy_state_gains_an_empty_inbox() {
 void existing_outputs_keep_their_shape() {
     Fixture f;
     const auto status = ok(f.store.handle({{"op", "status"}}));
-    check(keys(status) == std::set<std::string>{"ok", "requests_pending", "jobs_running", "tasks_todo", "notes", "lease", "presence"},
+    // 0.9.0 added agents, input_queue and quiet_window here and quiet_window to every
+    // request's response; nothing else may appear, and nothing may go.
+    check(keys(status) == std::set<std::string>{"ok", "requests_pending", "jobs_running", "tasks_todo", "notes", "lease", "presence",
+                                                "agents", "input_queue", "quiet_window"},
           "status fields changed: " + status.dump());
     check(keys(ok(f.store.handle({{"op", "presence.get"}}))) == std::set<std::string>{"ok", "presence"}, "presence fields changed");
     const auto created = ok(f.store.handle({{"op", "request.create"}, {"chat", "A"}, {"message", "m"}}));
-    check(keys(created) == std::set<std::string>{"ok", "request", "presence"}, "request.create fields changed");
+    check(keys(created) == std::set<std::string>{"ok", "request", "presence", "quiet_window"}, "request.create fields changed");
     check(keys(created["request"]) == std::set<std::string>{"id", "chat", "message", "kind", "created_at", "expires_at",
           "status", "response", "lease_seconds", "lease_until"}, "request record fields changed: " + created.dump());
     const auto notice = ok(f.store.handle({{"op", "notify"}, {"chat", "A"}, {"message", "m"}}));
@@ -1539,9 +1545,440 @@ void existing_outputs_keep_their_shape() {
           keys(ok(f.store.handle({{"op", "status"}}))) == keys(status), "done changed status output");
 }
 
+// tests/fixtures/state-0.8.0.json was written by the store at commit 976ffb0, the
+// source of the 0.8.0 build, through its own operations. See its README.
+void state_from_0_8_0_loads_unchanged() {
+    const auto original = read_file(std::filesystem::path(KNOCK_TEST_FIXTURES) / "state-0.8.0.json");
+    const auto expected = Json::parse(original);
+    for (const auto* key : {"requests", "jobs", "tasks", "notes", "trash", "inbox", "agents"})
+        check(!expected[key].empty(), std::string("The fixture has no ") + key);
+    check(!expected.contains("quiet_windows"), "The fixture is not from before quiet windows");
+
+    Fixture f;
+    f.store.stop();
+    std::filesystem::remove_all(f.directory);
+    std::filesystem::create_directories(f.directory);
+    const auto path = f.directory / "state.json";
+    write_file(path, original);
+
+    Store loaded(f.directory);
+    loaded.load();
+    check(read_file(path) == original, "Opening a 0.8.0 state rewrote the file");
+    const auto snapshot = loaded.snapshot();
+    for (const auto* key : {"requests", "jobs", "tasks", "inbox", "agents", "preferences", "presence", "lease", "schema"})
+        check(snapshot[key] == expected[key], std::string("A 0.8.0 field changed on load: ") + key);
+    check(snapshot["quiet_windows"].empty(), "Old state grew quiet windows");
+    for (const auto& note : expected["notes"]) {
+        const auto read = ok(loaded.handle({{"op", "note.get"}, {"id", note["id"]}, {"limit", 100}}));
+        check(read["total_messages"] == note["messages"].size(), "A note lost messages");
+    }
+    const auto working = ok(loaded.handle({{"op", "status"}}))["agents"];
+    check(working.size() == 1 && working[0]["chat"] == "WORK-1" && working[0]["status_text"] == "Second pass \xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E",
+          "Status does not list the one job still working: " + working.dump());
+
+    // Written back through a real change, the only new top-level key is the new list.
+    ok(loaded.handle({{"op", "quiet.open"}, {"chat", "RUN-1"}, {"minutes", 5}, {"reason", "Timing"}}));
+    auto saved = Json::parse(read_file(path));
+    check(saved["quiet_windows"].size() == 1, "The quiet window was not saved");
+    saved.erase("quiet_windows");
+    check(saved == expected, "Saving lost or changed 0.8.0 data");
+    loaded.stop();
+    Store again(f.directory);
+    again.load();
+    check(knock::quiet_window_view(again.snapshot(), knock::now_ms())["chat"] == "RUN-1", "The quiet window did not survive a restart");
+    check(again.snapshot()["requests"] == expected["requests"], "0.8.0 requests changed after reloading");
+}
+
+void set_presence(Store& store, const std::string& state, const std::string& message = {}) {
+    ok(store.handle({{"op", "presence.update"}, {"state", state}, {"message", message}}, true));
+}
+
+Json status_of(Store& store, const Json& item) {
+    return ok(store.handle({{"op", "request.result"}, {"id", item["id"]}}));
+}
+
+void input_requests_wait_in_line() {
+    Fixture f;
+    std::vector<Json> events;
+    std::mutex events_lock;
+    f.store.set_changed([&](const Json& change) { std::lock_guard guard(events_lock); events.push_back(change); });
+    const auto banners = [&] {
+        std::lock_guard guard(events_lock);
+        std::vector<std::string> chats;
+        for (const auto& change : events) if (change["type"] == "request") chats.push_back(change["chat"]);
+        events.clear();
+        return chats;
+    };
+
+    const auto holder = request(f.store, "HOLD-1", "input", 1800, 120);
+    check(!ok(f.store.handle({{"op", "request.result"}, {"id", holder["id"]}})).contains("queue"), "Nothing is ahead of the first request");
+    check(banners() == std::vector<std::string>{"HOLD-1"}, "The first request did not reach the person");
+    ok(answer(f.store, holder, "approved"));
+
+    // The second and third take their places and say how long.
+    const auto second = ok(f.store.handle({{"op", "request.create"}, {"chat", "NEXT-2"}, {"message", "m"}, {"lease_seconds", 60}}));
+    const auto third = ok(f.store.handle({{"op", "request.create"}, {"chat", "LAST-3"}, {"message", "m"}, {"lease_seconds", 90}}));
+    check(second["request"]["status"] == "pending" && second["request"]["queued"] == true, "The second was not queued");
+    check(second["queue"]["position"] == 1 && second["queue"]["ahead"] == 1 && second["queue"]["holder"] == "HOLD-1" &&
+          second["queue"]["expected_wait_seconds"].get<int>() > 100 && second["queue"]["expected_wait_seconds"].get<int>() <= 120 &&
+          second["queue"]["may_expire_first"] == false, "Wrong place for the second: " + second.dump());
+    check(third["queue"]["position"] == 2 && third["queue"]["ahead"] == 2 &&
+          third["queue"]["expected_wait_seconds"].get<int>() > 160 && third["queue"]["expected_wait_seconds"].get<int>() <= 180,
+          "Wrong place for the third: " + third.dump());
+    check(third["queue"]["expected_at"].get<std::int64_t>() > second["queue"]["expected_at"].get<std::int64_t>(), "The line is out of order");
+    check(banners().empty(), "A queued request interrupted the person");
+    const auto line = ok(f.store.handle({{"op", "status"}}))["input_queue"];
+    check(line.size() == 2 && line[0]["chat"] == "NEXT-2" && line[0]["position"] == 1 && line[1]["position"] == 2,
+          "status does not show the line: " + line.dump());
+    // A short timeout is told it may not last.
+    const auto hasty = ok(f.store.handle({{"op", "request.create"}, {"chat", "SOON-9"}, {"message", "m"}, {"timeout_seconds", 5}}));
+    check(hasty["queue"]["may_expire_first"] == true, "A request that cannot last was not warned");
+    ok(f.store.handle({{"op", "request.cancel"}, {"id", hasty["request"]["id"]}}));
+
+    // Questions need no input and are not queued.
+    const auto question = ok(f.store.handle({{"op", "request.create"}, {"chat", "ASK-4"}, {"kind", "question"}, {"message", "m"}}));
+    check(!question.contains("queue") && !question["request"].contains("queued"), "A question was queued: " + question.dump());
+    check(banners() == std::vector<std::string>{"ASK-4"}, "A question did not reach the person");
+    ok(answer(f.store, question["request"], "approved"));
+    check(f.store.snapshot()["lease"]["id"] == holder["id"], "A question disturbed the lease");
+
+    // The lease is exclusive, and nobody overtakes.
+    fails(answer(f.store, second["request"], "approved"), "input_busy");
+    ok(f.store.handle({{"op", "request.release"}, {"id", holder["id"]}}));
+    fails(answer(f.store, third["request"], "approved"), "input_queued");
+    check(banners() == std::vector<std::string>{"NEXT-2"}, "Release did not send only the next to the person");
+    auto next = status_of(f.store, second["request"]);
+    check(next["request"]["status"] == "pending" && !next["request"].contains("queued") && !next.contains("queue") &&
+          f.store.snapshot()["lease"].is_null(), "Release granted something by itself: " + next.dump());
+    check(status_of(f.store, third["request"])["queue"]["position"] == 2, "The third lost its place");
+
+    // An answer other than yes moves the line on too.
+    ok(answer(f.store, second["request"], "denied"));
+    check(banners() == std::vector<std::string>{"LAST-3"}, "A refusal did not reach the next in line");
+    check(!status_of(f.store, third["request"]).contains("queue"), "The last request is still behind someone");
+    ok(answer(f.store, third["request"], "approved"));
+    check(f.store.snapshot()["lease"]["id"] == third["request"]["id"], "The last in line did not get the lease");
+    ok(f.store.handle({{"op", "request.release"}, {"id", third["request"]["id"]}}));
+
+    // Leaving the line closes the gap: cancelling the one ahead promotes the one behind.
+    const auto a = request(f.store, "A-1");
+    ok(answer(f.store, a, "approved"));
+    const auto b = request(f.store, "B-2");
+    const auto c = request(f.store, "C-3");
+    ok(f.store.handle({{"op", "request.cancel"}, {"id", b["id"]}}));
+    check(status_of(f.store, c)["queue"]["position"] == 1, "Cancelling did not move the line up");
+    banners();
+    ok(f.store.handle({{"op", "request.release"}, {"id", a["id"]}}));
+    check(banners() == std::vector<std::string>{"C-3"}, "The line did not reach the remaining request");
+    ok(answer(f.store, c, "denied"));
+}
+
+void queue_moves_when_a_lease_or_a_request_expires() {
+    Fixture f;
+    std::vector<Json> events;
+    std::mutex events_lock;
+    f.store.set_changed([&](const Json& change) { std::lock_guard guard(events_lock); events.push_back(change); });
+
+    // A lease that runs out passes to the next, even for a waiter nobody ticks for.
+    const auto short_lease = request(f.store, "SHORT-1", "input", 60, 1);
+    ok(answer(f.store, short_lease, "approved"));
+    const auto gone = request(f.store, "GONE-2", "input", 1);    // Expires in the line.
+    const auto next = request(f.store, "NEXT-3", "input", 60);
+    auto waiting = std::async(std::launch::async, [&] {
+        return f.store.handle({{"op", "request.wait"}, {"id", next["id"]}, {"wait_seconds", 1}});
+    });
+    check(waiting.wait_for(4s) == std::future_status::ready, "A waiter did not wake when the lease ended");
+    ok(waiting.get());
+    std::this_thread::sleep_for(50ms);
+    f.store.tick();
+    check(status_of(f.store, short_lease)["request"]["release_reason"] == "expired", "The lease did not expire");
+    check(status_of(f.store, gone)["request"]["status"] == "expired", "A queued request outlived its timeout");
+    const auto promoted = status_of(f.store, next);
+    check(promoted["request"]["status"] == "pending" && !promoted["request"].contains("queued") && !promoted.contains("queue") &&
+          f.store.snapshot()["lease"].is_null(), "Expiry did not put the next in front of the person: " + promoted.dump());
+    {
+        std::lock_guard guard(events_lock);
+        check(std::any_of(events.begin(), events.end(), [](const Json& change) {
+            return change["type"] == "request" && change["chat"] == "NEXT-3";
+        }), "The person was not told the next request's turn had come");
+    }
+
+    // A restart ends the lease but grants nothing, even while away: the waiters have gone.
+    Fixture restart;
+    const auto holding = request(restart.store, "HOLD-1");
+    ok(answer(restart.store, holding, "approved"));
+    const auto one = request(restart.store, "ONE-2");
+    const auto two = request(restart.store, "TWO-3");
+    set_presence(restart.store, "away");
+    restart.store.stop();
+    Store reopened(restart.directory);
+    reopened.load();
+    const auto snapshot = reopened.snapshot();
+    check(snapshot["lease"].is_null(), "A lease survived a restart");
+    check(status_of(reopened, one)["request"]["status"] == "pending" && !status_of(reopened, one)["request"].contains("queued"),
+          "The first in line cannot be answered after a restart");
+    check(status_of(reopened, two)["request"]["queued"] == true, "The second lost its place on restart");
+    reopened.stop();
+}
+
+void away_grants_the_lease_in_turn() {
+    Fixture f;
+    set_presence(f.store, "away", "Out for coffee.");
+    const auto first = ok(f.store.handle({{"op", "request.create"}, {"chat", "A-1"}, {"message", "m"}, {"lease_seconds", 30}}));
+    const auto until = first["request"]["lease_until"].get<std::int64_t>();
+    check(first["request"]["status"] == "approved" && first["request"]["granted_by"] == "away" && until > knock::now_ms() &&
+          f.store.snapshot()["lease"]["id"] == first["request"]["id"], "Away did not grant the first request: " + first.dump());
+    const auto waited = ok(f.store.handle({{"op", "request.wait"}, {"id", first["request"]["id"]}, {"wait_seconds", 5}, {"stop_when_unavailable", true}}));
+    check(waited["request"]["status"] == "approved" && !waited.contains("wait_reason"), "A grant was reported as presence");
+
+    // One at a time: the second holds its place through Away, and is granted when its turn comes.
+    const auto second = request(f.store, "B-2", "input", 60, 30);
+    const auto third = request(f.store, "C-3", "input", 60, 30);
+    check(second["status"] == "pending" && second["queued"] == true && f.store.snapshot()["lease"]["id"] == first["request"]["id"],
+          "Away granted a second lease");
+    auto waiter = std::async(std::launch::async, [&] {
+        return f.store.handle({{"op", "request.wait"}, {"id", second["id"]}, {"wait_seconds", 10}, {"stop_when_unavailable", true}});
+    });
+    check(waiter.wait_for(50ms) == std::future_status::timeout, "A queued request gave up its place because of Away");
+    ok(f.store.handle({{"op", "request.release"}, {"id", first["request"]["id"]}}));
+    check(waiter.wait_for(1s) == std::future_status::ready, "Release did not wake the next in line");
+    const auto turn = ok(waiter.get());
+    check(turn["request"]["status"] == "approved" && turn["request"]["granted_by"] == "away" && turn["request"]["response"] == "Away" &&
+          f.store.snapshot()["lease"]["id"] == second["id"], "The next in line was not granted: " + turn.dump());
+    check(status_of(f.store, third)["queue"]["position"] == 1, "The third did not move up");
+
+    // Coming back ends the away rule: the next turn goes to the person.
+    set_presence(f.store, "at_pc");
+    check(f.store.snapshot()["lease"]["id"] == second["id"], "Changing presence ended a lease");
+    ok(f.store.handle({{"op", "request.release"}, {"id", second["id"]}}));
+    check(status_of(f.store, third)["request"]["status"] == "pending" && f.store.snapshot()["lease"].is_null(),
+          "At PC granted a request by itself");
+    // A change of presence alone grants nothing either; the person can still answer it.
+    set_presence(f.store, "away");
+    check(status_of(f.store, third)["request"]["status"] == "pending" && f.store.snapshot()["lease"].is_null(),
+          "Going away granted what was already in front of the person");
+    const auto stopped = ok(f.store.handle({{"op", "request.wait"}, {"id", third["id"]}, {"wait_seconds", 5}, {"stop_when_unavailable", true}}));
+    check(stopped["wait_reason"] == "presence", "A request not in the line did not return for presence");
+    ok(answer(f.store, third, "denied"));
+
+    // Questions are never granted, and an owner's Yes is still a Yes.
+    const auto question = ok(f.store.handle({{"op", "request.create"}, {"chat", "ASK-1"}, {"kind", "question"}, {"message", "m"}}));
+    check(question["request"]["status"] == "pending", "Away answered a question");
+
+    // A lease ending by time passes on under the same rule.
+    const auto brief = request(f.store, "D-4", "input", 60, 1);
+    check(brief["status"] == "approved", "Away did not grant the short lease");
+    const auto after = request(f.store, "E-5", "input", 60, 30);
+    std::this_thread::sleep_for(1100ms);
+    f.store.tick();
+    check(status_of(f.store, after)["request"]["granted_by"] == "away", "An expired lease did not pass on while away");
+    ok(f.store.handle({{"op", "request.release"}, {"id", after["id"]}}));
+
+    // A message that withholds input leaves the request with the person.
+    for (const auto* message : {"no input", "NO INPUT please", "Do not use the mouse.", "Don\xE2\x80\x99t touch the keyboard", "don't use my screens",
+                                "Continue headless tests.", "Input withheld", "Hands off for now", "ask before using the desktop, ask first"}) {
+        set_presence(f.store, "away", message);
+        const auto refused = request(f.store, "NO-1");
+        check(refused["status"] == "pending" && f.store.snapshot()["lease"].is_null(),
+              std::string("This message did not withhold input: ") + message);
+        const auto result = ok(f.store.handle({{"op", "request.wait"}, {"id", refused["id"]}, {"wait_seconds", 5}, {"stop_when_unavailable", true}}));
+        check(result["wait_reason"] == "presence", "A withheld request did not return for presence");
+        ok(f.store.handle({{"op", "request.cancel"}, {"id", refused["id"]}}));
+    }
+    for (const auto* message : {"", "Back at nine, no rush.", "Not using the PC tonight.", "Use whatever you need."}) {
+        set_presence(f.store, "away", message);
+        const auto granted = request(f.store, "YES-1");
+        check(granted["status"] == "approved", std::string("This message withheld input: ") + message);
+        ok(f.store.handle({{"op", "request.release"}, {"id", granted["id"]}}));
+    }
+
+    // Busy never grants, and returns as before with its place in the line.
+    set_presence(f.store, "busy", "In a meeting");
+    const auto busy = request(f.store, "BUSY-1");
+    check(busy["status"] == "pending" && f.store.snapshot()["lease"].is_null(), "Busy granted input");
+    ok(answer(f.store, busy, "approved"));
+    const auto behind = request(f.store, "BUSY-2");
+    const auto returned = ok(f.store.handle({{"op", "request.wait"}, {"id", behind["id"]}, {"wait_seconds", 5}, {"stop_when_unavailable", true}}));
+    check(returned["wait_reason"] == "presence" && returned["queue"]["position"] == 1, "Busy lost the place in the line");
+}
+
+void quiet_windows_are_one_at_a_time() {
+    Fixture f;
+    const auto closed = ok(f.store.handle({{"op", "quiet.status"}}));
+    check(closed["quiet_window"]["open"] == false && closed["waiting"].empty(), "A fresh state has a quiet window");
+    fails(f.store.handle({{"op", "quiet.open"}, {"chat", "A"}, {"reason", "r"}}), "missing_field");
+    fails(f.store.handle({{"op", "quiet.open"}, {"chat", "A"}, {"minutes", 5}}), "missing_field");
+    fails(f.store.handle({{"op", "quiet.open"}, {"chat", "A"}, {"reason", " "}, {"minutes", 5}}), "empty_field");
+    fails(f.store.handle({{"op", "quiet.open"}, {"reason", "r"}, {"minutes", 5}}), "missing_field");
+    for (const auto minutes : {0, 241, -1})
+        fails(f.store.handle({{"op", "quiet.open"}, {"chat", "A"}, {"reason", "r"}, {"minutes", minutes}}), "integer_out_of_range");
+    check(f.store.snapshot()["quiet_windows"].empty(), "A refused window was kept");
+
+    const auto started = knock::now_ms();
+    const auto first = ok(f.store.handle({{"op", "quiet.open"}, {"chat", "RUN-1"}, {"minutes", 10}, {"reason", "Timing\nstartup \x1b[31mcold\x1b[0m"}}));
+    check(first["quiet"]["status"] == "open" && first["quiet"]["reason"] == "Timing startup cold" && !first.contains("queue") &&
+          first["quiet_window"]["open"] == true && first["quiet_window"]["chat"] == "RUN-1" &&
+          first["quiet_window"]["until"].get<std::int64_t>() >= started + 600000, "Wrong open window: " + first.dump());
+
+    // Everything an agent reads says it is open, by whom and until when.
+    const auto until = first["quiet"]["until"];
+    const auto says_open = [&](const Json& result, const char* where) {
+        check(result["quiet_window"]["open"] == true && result["quiet_window"]["chat"] == "RUN-1" && result["quiet_window"]["until"] == until &&
+              result["quiet_window"]["reason"] == "Timing startup cold", std::string(where) + " does not say a window is open: " + result.dump());
+    };
+    const auto asked = ok(f.store.handle({{"op", "request.create"}, {"chat", "Q-1"}, {"kind", "question"}, {"message", "m"}}));
+    says_open(asked, "request.create");
+    says_open(ok(f.store.handle({{"op", "request.result"}, {"id", asked["request"]["id"]}})), "request.result");
+    says_open(ok(f.store.handle({{"op", "request.wait"}, {"id", asked["request"]["id"]}, {"wait_seconds", 1}})), "request.wait");
+    says_open(ok(answer(f.store, asked["request"], "denied")), "request.resolve");
+    says_open(ok(f.store.handle({{"op", "status"}})), "status");
+    says_open(ok(f.store.handle({{"op", "quiet.status"}})), "quiet.status");
+    says_open(ok(f.store.handle({{"op", "agent.start"}, {"chat", "W-1"}, {"title", "t"}})), "agent.start");
+
+    // Asking again keeps the same window and clock.
+    const auto again = ok(f.store.handle({{"op", "quiet.open"}, {"chat", "RUN-1"}, {"minutes", 60}, {"reason", "Other"}}));
+    check(again["already"] == true && again["quiet"]["id"] == first["quiet"]["id"] && again["quiet"]["until"] == until, "Asking again changed the window");
+
+    // A second waits like a lease: place, expected wait, and its own clock from when it opens.
+    const auto second = ok(f.store.handle({{"op", "quiet.open"}, {"chat", "RUN-2"}, {"minutes", 1}, {"reason", "Second"}, {"timeout_seconds", 3600}}));
+    const auto third = ok(f.store.handle({{"op", "quiet.open"}, {"chat", "RUN-3"}, {"minutes", 2}, {"reason", "Third"}, {"timeout_seconds", 60}}));
+    check(second["quiet"]["status"] == "waiting" && second["queue"]["position"] == 1 && second["queue"]["ahead"] == 1 &&
+          second["queue"]["holder"] == "RUN-1" && second["queue"]["expected_wait_seconds"].get<int>() > 590 &&
+          second["queue"]["may_expire_first"] == false, "Wrong wait for the second: " + second.dump());
+    check(third["queue"]["position"] == 2 && third["queue"]["ahead"] == 2 && third["queue"]["expected_wait_seconds"].get<int>() > 650 &&
+          third["queue"]["may_expire_first"] == true, "Wrong wait for the third: " + third.dump());
+    const auto waiting = ok(f.store.handle({{"op", "quiet.status"}}));
+    check(waiting["quiet_window"]["waiting"] == 2 && waiting["waiting"].size() == 2 && waiting["waiting"][0]["chat"] == "RUN-2" &&
+          waiting["waiting"][1]["position"] == 2, "quiet.status does not list the line: " + waiting.dump());
+
+    // The waiter blocks without polling; a release opens the next.
+    auto waiter = std::async(std::launch::async, [&] {
+        return f.store.handle({{"op", "quiet.wait"}, {"id", second["quiet"]["id"]}, {"wait_seconds", 10}});
+    });
+    check(waiter.wait_for(50ms) == std::future_status::timeout, "The second window did not wait");
+    // A named release only ends that chat's own window.
+    const auto other = ok(f.store.handle({{"op", "quiet.release"}, {"chat", "NOBODY"}}));
+    check(other["quiet"].is_null() && other["quiet_window"]["chat"] == "RUN-1", "Another chat ended the window");
+    const auto released = ok(f.store.handle({{"op", "quiet.release"}}));
+    check(released["quiet"]["status"] == "ended" && released["quiet"]["end_reason"] == "released" && released["quiet"]["chat"] == "RUN-1",
+          "Wrong release: " + released.dump());
+    check(waiter.wait_for(1s) == std::future_status::ready, "Release did not wake the next window");
+    const auto opened = ok(waiter.get());
+    check(opened["quiet"]["status"] == "open" && opened["quiet"]["chat"] == "RUN-2" && opened["quiet_window"]["chat"] == "RUN-2" &&
+          opened["quiet"]["until"].get<std::int64_t>() >= knock::now_ms() + 59000 && !opened.contains("queue"),
+          "The next window did not open with a full clock: " + opened.dump());
+    check(released["quiet_window"]["chat"] == "RUN-2", "The release's JSON does not show the next window");
+
+    // A waiting one can leave the line; releasing nothing is harmless.
+    const auto left = ok(f.store.handle({{"op", "quiet.release"}, {"chat", "RUN-3"}}));
+    check(left["quiet"]["end_reason"] == "cancelled" && left["quiet_window"]["chat"] == "RUN-2", "Leaving the line changed the open window");
+    ok(f.store.handle({{"op", "quiet.release"}, {"id", opened["quiet"]["id"]}}));
+    check(ok(f.store.handle({{"op", "quiet.release"}}))["quiet"].is_null(), "Releasing nothing failed");
+    check(ok(f.store.handle({{"op", "quiet.status"}}))["quiet_window"]["open"] == false, "A window stayed open");
+    fails(f.store.handle({{"op", "quiet.wait"}, {"id", "missing"}, {"wait_seconds", 1}}), "not_found");
+}
+
+void quiet_windows_expire_and_survive_restart() {
+    Fixture f;
+    const auto write_until = [&](const std::string& id, std::int64_t until) {
+        f.store.stop();
+        auto state = Json::parse(read_file(f.directory / "state.json"));
+        for (auto& window : state["quiet_windows"]) if (window["id"] == id) window["until"] = until;
+        write_file(f.directory / "state.json", state.dump());
+    };
+    const auto first = ok(f.store.handle({{"op", "quiet.open"}, {"chat", "RUN-1"}, {"minutes", 1}, {"reason", "r"}}));
+    const auto second = ok(f.store.handle({{"op", "quiet.open"}, {"chat", "RUN-2"}, {"minutes", 3}, {"reason", "r"}}));
+    const auto gone = ok(f.store.handle({{"op", "quiet.open"}, {"chat", "RUN-3"}, {"minutes", 3}, {"reason", "r"}, {"timeout_seconds", 1}}));
+
+    // A waiter's own time budget ends without the line moving.
+    auto wait = std::async(std::launch::async, [&] {
+        return f.store.handle({{"op", "quiet.wait"}, {"id", gone["quiet"]["id"]}, {"wait_seconds", 5}});
+    });
+    check(wait.wait_for(4s) == std::future_status::ready, "A waiter did not end at its timeout");
+    const auto timed_out = ok(wait.get());
+    check(timed_out["quiet"]["status"] == "ended" && timed_out["quiet"]["end_reason"] == "timed_out" &&
+          ok(f.store.handle({{"op", "quiet.status"}}))["quiet_window"]["chat"] == "RUN-1", "A timeout disturbed the line: " + timed_out.dump());
+
+    // Survives a restart, then ends by itself and opens the next.
+    write_until(first["quiet"]["id"], knock::now_ms() + 300);
+    Store reopened(f.directory);
+    reopened.load();
+    check(knock::quiet_window_view(reopened.snapshot(), knock::now_ms())["chat"] == "RUN-1", "A restart ended an open window");
+    check(knock::quiet_window_view(reopened.snapshot(), knock::now_ms())["waiting"] == 1, "A restart lost the waiting window");
+    std::this_thread::sleep_for(350ms);
+    reopened.tick();
+    const auto next = ok(reopened.handle({{"op", "quiet.status"}}));
+    check(next["quiet_window"]["chat"] == "RUN-2" && next["quiet_window"]["remaining_seconds"].get<int>() > 170 && next["waiting"].empty(),
+          "The window did not end by itself: " + next.dump());
+    const auto saved = Json::parse(read_file(f.directory / "state.json"));
+    check(saved["quiet_windows"][0]["end_reason"] == "expired", "The ended window was not saved as expired");
+
+    // A waiter wakes when the window ahead of it runs out, even with no tick.
+    Fixture g;
+    ok(g.store.handle({{"op", "quiet.open"}, {"chat", "A"}, {"minutes", 1}, {"reason", "r"}}));
+    const auto b = ok(g.store.handle({{"op", "quiet.open"}, {"chat", "B"}, {"minutes", 1}, {"reason", "r"}}));
+    g.store.stop();
+    auto state = Json::parse(read_file(g.directory / "state.json"));
+    state["quiet_windows"][0]["until"] = knock::now_ms() + 300;
+    write_file(g.directory / "state.json", state.dump());
+    Store live(g.directory);
+    live.load();
+    auto woken = std::async(std::launch::async, [&] {
+        return live.handle({{"op", "quiet.wait"}, {"id", b["quiet"]["id"]}, {"wait_seconds", 5}});
+    });
+    check(woken.wait_for(3s) == std::future_status::ready, "A waiter slept through the end of the window");
+    check(ok(woken.get())["quiet"]["status"] == "open", "The waiter's window did not open");
+    live.stop();
+
+    // Only a short tail of finished windows is kept.
+    Fixture h;
+    for (int i = 0; i < 30; ++i) {
+        ok(h.store.handle({{"op", "quiet.open"}, {"chat", "T-" + std::to_string(i)}, {"minutes", 1}, {"reason", "r"}}));
+        ok(h.store.handle({{"op", "quiet.release"}}));
+    }
+    check(h.store.snapshot()["quiet_windows"].size() <= 21, "Finished windows pile up");
+}
+
+void stored_quiet_windows_are_validated() {
+    const auto rejected = [](const Json& windows) {
+        Fixture f;
+        f.store.stop();
+        auto state = Json::parse(read_file(f.directory / "state.json"));
+        state["quiet_windows"] = windows;
+        const auto text = state.dump();
+        write_file(f.directory / "state.json", text);
+        Store broken(f.directory);
+        bool threw = false;
+        try { broken.load(); } catch (const std::exception&) { threw = true; }
+        check(threw, "An invalid quiet window was accepted: " + windows.dump());
+        check(read_file(f.directory / "state.json") == text, "A refused state file was changed");
+    };
+    const Json open{{"id", "a"}, {"chat", "A"}, {"reason", "r"}, {"minutes", 1}, {"created_at", 1}, {"status", "open"}, {"opened_at", 1}, {"until", 4102444800000LL}};
+    rejected(Json::object());
+    rejected(Json::array({1}));
+    auto missing = open; missing.erase("until");
+    rejected(Json::array({missing}));
+    auto status = open; status["status"] = "maybe";
+    rejected(Json::array({status}));
+    auto minutes = open; minutes["minutes"] = 0;
+    rejected(Json::array({minutes}));
+    auto second = open; second["id"] = "b";
+    rejected(Json::array({open, second}));
+    rejected(Json::array({open, open}));
+    auto waiting = open; waiting["id"] = "c"; waiting["status"] = "waiting";
+    rejected(Json::array({waiting}));
+}
+
 int main() {
     const std::vector<std::pair<const char*, std::function<void()>>> tests = {
         {"fresh state and invalid input", fresh_state_and_validation},
+        {"a state written by 0.8.0", state_from_0_8_0_loads_unchanged},
+        {"input requests wait in line, in order", input_requests_wait_in_line},
+        {"the line moves on expiry and survives a restart", queue_moves_when_a_lease_or_a_request_expires},
+        {"away grants the lease in turn, unless the message withholds it", away_grants_the_lease_in_turn},
+        {"quiet windows are one at a time", quiet_windows_are_one_at_a_time},
+        {"quiet windows expire and survive a restart", quiet_windows_expire_and_survive_restart},
+        {"stored quiet windows are validated", stored_quiet_windows_are_validated},
         {"check-in, status and done", agents_check_in_update_and_finish},
         {"stored check-ins are validated", agents_are_validated_when_loaded},
         {"a state written by 0.7.0", state_from_0_7_0_loads_unchanged},

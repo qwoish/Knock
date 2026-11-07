@@ -1,0 +1,329 @@
+{
+  "agents": [
+    {
+      "chat": "WORK-1",
+      "created_at": 1794009519046,
+      "id": "1a1b34cd3c7-f0fa7d1757464ab-38",
+      "report": "C:\\Projects\\work-1.md",
+      "started_at": 1794009519046,
+      "status": "working",
+      "status_text": "Second pass 日本語",
+      "title": "Measure the slow disk",
+      "updated_at": 1794009519050
+    },
+    {
+      "chat": "UI-1",
+      "created_at": 1794009519054,
+      "finished_at": 1794009519060,
+      "id": "1a1b34cd3ce-87132cb3ca01eea5-3b",
+      "report": "",
+      "started_at": 1794009519054,
+      "status": "done",
+      "status_text": "",
+      "title": "Polish the window",
+      "updated_at": 1794009519054
+    },
+    {
+      "archived": true,
+      "chat": "OLD-9",
+      "created_at": 1794009519065,
+      "finished_at": 1794009519069,
+      "id": "1a1b34cd3d9-22d56fbbcc375b84-3e",
+      "report": "",
+      "started_at": 1794009519065,
+      "status": "done",
+      "status_text": "",
+      "title": "Gone",
+      "updated_at": 1794009519065
+    }
+  ],
+  "inbox": [
+    {
+      "archived": true,
+      "chat": "SITE-1",
+      "created_at": 1794009519037,
+      "finished_at": 1794009519037,
+      "id": "1a1b34cd3bd-19030d584f842126-35",
+      "report": "",
+      "status": "done",
+      "summary": "Old job.",
+      "tasks_completed": [],
+      "updated_at": 1794009519037
+    },
+    {
+      "chat": "UI-1",
+      "created_at": 1794009519032,
+      "finished_at": 1794009519060,
+      "id": "1a1b34cd3b8-87846a290470edea-33",
+      "report": "",
+      "status": "done",
+      "summary": "Polish finished.",
+      "tasks_completed": [],
+      "updated_at": 1794009519060
+    },
+    {
+      "chat": "OLD-9",
+      "created_at": 1794009519069,
+      "finished_at": 1794009519069,
+      "id": "1a1b34cd3dd-857d198f624781aa-40",
+      "report": "",
+      "status": "done",
+      "summary": "Gone.",
+      "tasks_completed": [],
+      "updated_at": 1794009519069
+    }
+  ],
+  "jobs": [
+    {
+      "chat": "BUILD-1",
+      "command": "cmake --build build",
+      "created_at": 1794009518960,
+      "cwd": "C:\\Projects\\Current",
+      "exit_code": null,
+      "id": "1a1b34cd370-46143eb9caa6aedc-13",
+      "log_path": "",
+      "output_tail": "",
+      "resume_text": "",
+      "status": "running",
+      "title": "Release build",
+      "worker_pid": 4242
+    },
+    {
+      "chat": "BUILD-2",
+      "command": "ctest",
+      "created_at": 1794009518968,
+      "cwd": "C:\\Projects\\Current",
+      "exit_code": 0,
+      "finished_at": 1794009518972,
+      "id": "1a1b34cd378-345fe268e1e82d93-16",
+      "log_path": "",
+      "output_tail": "100% tests passed",
+      "resume_text": "",
+      "status": "completed",
+      "title": "Tests",
+      "worker_pid": 0
+    },
+    {
+      "chat": "BUILD-3",
+      "command": "lint",
+      "created_at": 1794009518976,
+      "cwd": "C:\\Projects\\Current",
+      "exit_code": 3,
+      "finished_at": 1794009518979,
+      "id": "1a1b34cd380-64e332510e83234d-19",
+      "log_path": "",
+      "output_tail": "3 problems",
+      "resume_text": "",
+      "status": "failed",
+      "title": "Lint",
+      "worker_pid": 0
+    },
+    {
+      "chat": "RENDER-1",
+      "command": "",
+      "created_at": 1794009518983,
+      "cwd": "",
+      "exit_code": 0,
+      "finished_at": 1794009518983,
+      "id": "1a1b34cd387-eede7f97591606c2-1c",
+      "log_path": "",
+      "output_tail": "",
+      "resume_text": "@RENDER-1: continue",
+      "status": "notice",
+      "title": "Render finished.",
+      "worker_pid": 0
+    }
+  ],
+  "lease": null,
+  "notes": [
+    {
+      "body": "A description.",
+      "created_at": 1794009519000,
+      "id": "1a1b34cd398-3698caf360cd62eb-25",
+      "messages": [
+        {
+          "append_payload": {
+            "images": [],
+            "text": "First thought."
+          },
+          "client_id": "0123456789abcdef0123456789abcdef",
+          "created_at": 1794009519004,
+          "edited_at": 1794009519011,
+          "id": "1a1b34cd39c-854cc316cff399b8-27",
+          "images": [],
+          "revision": 1,
+          "text": "First thought, edited."
+        },
+        {
+          "created_at": 1794009519008,
+          "id": "1a1b34cd3a0-e9754f15c32a9f32-29",
+          "images": [],
+          "revision": 0,
+          "text": "Second thought\nwith a line break."
+        }
+      ],
+      "tags": [
+        "Ideas",
+        "旅行"
+      ],
+      "title": "Project ideas",
+      "updated_at": 1794009519011
+    },
+    {
+      "body": "",
+      "created_at": 1794009519015,
+      "id": "1a1b34cd3a7-48970c8b5f61b5af-2c",
+      "messages": [],
+      "tags": [],
+      "title": "Empty note",
+      "updated_at": 1794009519015
+    }
+  ],
+  "preferences": {
+    "busy_until": 0,
+    "saved_replies": [
+      "Later, please.",
+      "Continue with headless tests."
+    ],
+    "trash_retention_days": 45
+  },
+  "presence": {
+    "message": "Out for coffee.",
+    "state": "away",
+    "updated_at": 1794009519082
+  },
+  "requests": [
+    {
+      "chat": "AUDIO-1",
+      "created_at": 1794009518914,
+      "expires_at": 4102444800000,
+      "id": "1a1b34cd342-66612fc8c5b3af-1",
+      "kind": "input",
+      "lease_seconds": 300,
+      "lease_until": 0,
+      "message": "May I use the mouse and keyboard? — café 日本語",
+      "response": "",
+      "status": "pending"
+    },
+    {
+      "chat": "AUDIO-2",
+      "created_at": 1794009518918,
+      "expires_at": 4102444800000,
+      "id": "1a1b34cd346-113728d1a154e017-3",
+      "kind": "question",
+      "lease_seconds": 300,
+      "lease_until": 0,
+      "message": "Keep the old mixer?",
+      "response": "",
+      "status": "pending"
+    },
+    {
+      "archived": true,
+      "chat": "EDIT-1",
+      "created_at": 1794009518922,
+      "expires_at": 1794010118922,
+      "id": "1a1b34cd34a-22e945833e9a1fc6-5",
+      "kind": "input",
+      "lease_seconds": 120,
+      "lease_until": 0,
+      "message": "Input for drag tests?",
+      "resolved_at": 1794009518926,
+      "response": "No",
+      "status": "denied"
+    },
+    {
+      "chat": "EDIT-2",
+      "created_at": 1794009518930,
+      "expires_at": 1794010118930,
+      "id": "1a1b34cd352-17bedcd2b106ece4-8",
+      "kind": "input",
+      "lease_seconds": 300,
+      "lease_until": 0,
+      "message": "Input for scroll tests?",
+      "resolved_at": 1794009518933,
+      "response": "Not now. Continue with headless tests.",
+      "status": "custom"
+    },
+    {
+      "chat": "EDIT-3",
+      "created_at": 1794009518937,
+      "expires_at": 1794010118937,
+      "id": "1a1b34cd359-637a46a66b718e87-b",
+      "kind": "input",
+      "lease_seconds": 300,
+      "lease_until": 0,
+      "message": "Never mind.",
+      "resolved_at": 1794009518941,
+      "response": "",
+      "status": "cancelled"
+    },
+    {
+      "chat": "EDIT-4",
+      "created_at": 1794009518946,
+      "expires_at": 1794010118946,
+      "id": "1a1b34cd362-2d1debc774a923a1-e",
+      "kind": "input",
+      "lease_seconds": 60,
+      "lease_until": 1794009578950,
+      "message": "Input for one check?",
+      "release_reason": "released",
+      "released_at": 1794009518953,
+      "resolved_at": 1794009518950,
+      "response": "Yes",
+      "status": "released"
+    }
+  ],
+  "schema": 1,
+  "tasks": [
+    {
+      "body": "",
+      "created_at": 1794009518986,
+      "id": "1a1b34cd38a-758bf20535fc8ac1-1e",
+      "operator": "AUDIO-1",
+      "project": "CURRENT",
+      "status": "todo",
+      "title": "AUDIO-1: mixer tests",
+      "updated_at": 1794009518986
+    },
+    {
+      "body": "Ask about the fonts.",
+      "created_at": 1794009518990,
+      "id": "1a1b34cd38e-747954d180c87f43-20",
+      "operator": "ME",
+      "project": "",
+      "status": "in_progress",
+      "title": "Licence question",
+      "updated_at": 1794009518993
+    },
+    {
+      "body": "",
+      "created_at": 1794009518997,
+      "id": "1a1b34cd395-c30522ef4db45a1c-23",
+      "operator": "UI-1",
+      "project": "",
+      "status": "done",
+      "title": "UI-1: polish",
+      "updated_at": 1794009519032
+    }
+  ],
+  "trash": [
+    {
+      "body": "",
+      "created_at": 1794009519019,
+      "deleted_at": 4102444800000,
+      "id": "1a1b34cd3ab-2f35740ac7de43e7-2e",
+      "messages": [
+        {
+          "created_at": 1794009519023,
+          "id": "1a1b34cd3af-6ebb4788bb568370-30",
+          "images": [],
+          "revision": 0,
+          "text": "Kept in Trash."
+        }
+      ],
+      "tags": [],
+      "title": "Deleted note",
+      "updated_at": 1794009519023
+    }
+  ]
+}

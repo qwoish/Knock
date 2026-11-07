@@ -143,6 +143,24 @@ try {
     Assert-Equal @($inbox.inbox | Where-Object { $_.chat -eq 'SMOKE-1' }).Count 1 'Finished job is in the inbox'
     $null = Invoke-Knock -Arguments @('start', '--chat', 'SMOKE-1') -ExpectedExit 5
 
+    $quiet = Invoke-Knock -Arguments @('quiet', '--chat', 'SMOKE-1', '--minutes', '5', '--reason', 'Timing the smoke test')
+    Assert-Equal $quiet.quiet.status 'open' 'Quiet window opens'
+    $second = Invoke-Knock -Arguments @('quiet', '--chat', 'SMOKE-2', '--minutes', '1', '--reason', 'Second', '--detach')
+    Assert-Equal $second.quiet.status 'waiting' 'A second quiet window waits'
+    Assert-Equal $second.queue.position 1 'Place in the quiet line'
+    $null = Invoke-Knock -Arguments @('quiet', '--chat', 'SMOKE-3', '--minutes', '1', '--reason', 'Gives up', '--timeout', '1') -ExpectedExit 4
+    $asked = Invoke-Knock -Arguments @('request', '--chat', 'SMOKE-4', '--kind', 'question', '--message', 'Open?', '--detach')
+    Assert-Equal $asked.quiet_window.chat 'SMOKE-1' 'A request says whose window is open'
+    $null = Invoke-Knock -Arguments @('cancel', $asked.request.id)
+    $released = Invoke-Knock -Arguments @('quiet', '--release')
+    Assert-Equal $released.quiet.chat 'SMOKE-1' 'Release ends the open window'
+    $status = Invoke-Knock -Arguments @('quiet', '--status')
+    Assert-Equal $status.quiet_window.chat 'SMOKE-2' 'The next window opens'
+    $null = Invoke-Knock -Arguments @('quiet', '--release')
+    $null = Invoke-Knock -Arguments @('quiet', '--minutes', '1', '--reason', 'No chat') -ExpectedExit 5
+    $info = (& $cli 'info') -join "`n"
+    if ($LASTEXITCODE -ne 0 -or $info -notlike '*## On this PC now*') { throw 'knock info has no live section.' }
+
     Write-Host 'CLI smoke checks passed.'
     Write-Host "Test data: $testData"
 } finally {

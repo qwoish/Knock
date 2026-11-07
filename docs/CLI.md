@@ -5,8 +5,9 @@ Keep `knock.exe` and `KnockTray.exe` together. Run `KnockTray.exe` once, or use 
 Run `knock info` once to get the agent instructions, examples, and advice for
 reducing model polling and unnecessary tool output. `knock get-info` is an
 alias. This guide is embedded in the executable: it works with the tray closed
-and does not open or change saved data. `knock help` gives a shorter command
-reference. Both commands take no arguments.
+and never opens it. Its last section is live: if Knock is running, it lists the
+agents checked in now, who has the mouse and keyboard, and any quiet window. `knock
+help` gives a shorter command reference. Both commands take no arguments.
 
 All commands except help and info write one UTF-8 JSON object to standard output. Non-ASCII characters use JSON escapes so older PowerShell output encodings cannot damage them; JSON decoding restores the original text. Text fields are ordinary text, not commands. Every request, notice, and background job requires an explicit chat label such as `AUDIO-1` to identify the conversation to resume.
 
@@ -20,7 +21,7 @@ This returns `{ "ok": true, "presence": { "state": "away", "message": "Out for c
 
 Change it in the status column of the bar: click **At PC**, **Away** or **Busy**. The message box is optional and limited to 500 UTF-8 bytes; it is saved with the status when one is clicked, on **Enter**, or shortly after typing stops. **Status...** in the bar or tray menu focuses the message box. Presence also appears in `knock status` and all successful request create/result/wait responses.
 
-Presence is advisory. It never grants or revokes a lease, answers a request, or changes an expiry. The **Quiet** notification timer is a separate setting. Returning to At PC does not resume a CLI agent automatically.
+Presence never revokes a lease, answers a question, or changes an expiry. Away is the one case where it grants input: see [Waiting in line](#waiting-in-line). The **Quiet** notification timer is a separate setting. Returning to At PC does not resume a CLI agent automatically.
 
 ## Ask before using the desktop
 
@@ -30,11 +31,11 @@ knock request --chat AUDIO-1 --message "Permission to use mouse and keyboard for
 
 This opens a request in the tray inbox and sends a native Windows notification unless banners are quiet. The command normally sleeps waiting for a reply from the tray; the model does not need to keep calling it. The default request timeout is 30 minutes. `--timeout` accepts 1–86400 seconds; `--lease` accepts 1–3600 seconds, with a five-minute default.
 
-While presence is Away or Busy, a still-pending ordinary request returns immediately with the queued request, current `presence`, `wait_reason: "presence"`, and exit code `7`. The same applies when presence changes to Away or Busy while this command is waiting. An answer or expiry takes precedence over presence. An early pending result keeps its original ID and expiry and can still be answered later. Retain that ID, follow any relevant scheduling message, and continue independent work or end the turn instead of polling. At PC and an unset status preserve the normal waiting behavior.
+While presence is Busy, or Away with a message that withholds input, a still-pending ordinary request returns immediately with the queued request, current `presence`, `wait_reason: "presence"`, and exit code `7`. The same applies when presence changes to Away or Busy while this command is waiting. An answer or expiry takes precedence over presence. An early pending result keeps its original ID and expiry and can still be answered later. Retain that ID, follow any relevant scheduling message, and continue independent work or end the turn instead of polling. At PC and an unset status preserve the normal waiting behavior.
 
 Yes produces an `approved` result. No produces `denied`. A typed reply produces `custom` with the exact reply text in `response`. A custom reply never grants desktop input automatically.
 
-An approved input request includes `lease_until`, expressed as Unix milliseconds. Only one input lease can be active. Stop using the desktop when the lease ends, and release it as soon as testing finishes:
+An approved input request includes `lease_until`, expressed as Unix milliseconds. Only one input lease can be active; see [Waiting in line](#waiting-in-line). Stop using the desktop when the lease ends, and release it as soon as testing finishes:
 
 ```powershell
 knock release REQUEST_ID
@@ -47,6 +48,25 @@ Use `--kind question` for a Yes/No/Custom question that does not need an exclusi
 ```powershell
 knock request --chat DOCS-2 --kind question --message "Should I include the migration notes in the release?"
 ```
+
+### Waiting in line
+
+Knock grants one input lease at a time. A request that arrives while another agent holds the lease has `queued: true`, shows on the panel as QUEUED with its place, and no banner interrupts the person. Requests move up in the order they arrived; questions are never queued. The response has:
+
+```json
+"queue": {"position": 1, "ahead": 1, "holder": "UI-1", "holder_until": 1792641900000,
+          "expected_wait_seconds": 240, "expected_at": 1792641900000, "may_expire_first": false}
+```
+
+`position` 1 is next. `ahead` counts the lease and the requests before this one. `expected_wait_seconds` adds up the time left on the lease and the leases asked for ahead; it does not count the time the person takes to answer. `may_expire_first` warns that `--timeout` ends before the likely turn. A request's timeout keeps running while it waits.
+
+When a lease is released or expires, or the request ahead is answered, cancelled or expires, the next in line goes to the person with the usual banner, or is granted if the person is away. The person can answer NO or CUSTOM to a queued request; YES comes when its turn does.
+
+**Away:** while presence is Away and its message does not withhold input, the next in line, including a request arriving when the lease is free, is granted: `status: "approved"`, `response: "Away"`, `granted_by: "away"`, with a live `lease_until`. A waiting `knock request` holds its place through Away and returns when granted. A message withholds input when it says `headless`, `withhold` or `hands off`, or pairs a negative (`no`, `not`, `don't`, `never`, `without`, `avoid`, `stop`, `ask`, `wait`, ...) with `input`, `mouse`, `keyboard`, `desktop`, `screen`, `touch` or `use`. That is read in English and errs towards asking the person. Changing presence to Away does not by itself grant what was already in front of the person, and Busy never grants.
+
+A restart ends the lease and grants nothing; the next in line goes back to the person.
+
+`knock status` lists the line in `input_queue`.
 
 ### Hosts with short tool timeouts
 
@@ -140,11 +160,40 @@ knock update --chat UI-1 --status "Checking every screen at 125 percent"
   again. A `done`, or dismissing the row in the window, does not remove it; a later
   `start` or `update` brings the job back to work. An `update` with no earlier
   `start` also shows the job as working, using that line as its title.
-- Both print `{"ok":true,"agent":{...},"presence":{...}}`. The record has `id`,
+- Both print `{"ok":true,"agent":{...},"presence":{...},"quiet_window":{...}}`. The record has `id`,
   `chat`, `title`, `status` (`working` or `done`), `status_text`, `report`,
   `created_at`, `started_at`, `updated_at`, and `finished_at` once done.
 - Neither one grants input or answers anything. A job that never checks in still
   appears when it asks, runs a command, or finishes.
+- `knock status` lists the jobs working now in `agents` (`chat`, `title`, `status_text`,
+  `started_at`, `updated_at`), and `knock info` prints the same list. A job stays listed
+  until it runs `knock done` or the person dismisses it, so check how old a check-in is.
+
+## Announce a timed run
+
+```text
+knock quiet --chat CURRENT-11 --minutes 15 --reason "Timing startup on the slow disk" [--timeout 1800] [--detach]
+knock quiet --release [--chat CURRENT-11]
+knock quiet --status
+```
+
+A quiet window tells other agents to postpone heavy work. It is an announcement: it blocks nothing, asks nobody and grants no input. It is separate from the person's notification **Quiet** timer. It shows on the panel above the agents list, with **END QUIET**.
+
+- `--chat` and `--reason` (one line, up to 160 bytes) and `--minutes` (1 to 240) are required.
+- One is open at a time, and its clock starts when it opens. A second waits its turn: the command sleeps until then without polling, for up to `--timeout` seconds (1 to 86400, default 1800). `--detach` returns its place at once. Running the same command again from the same chat keeps the same window, its place and its clock, and picks the wait back up.
+- It ends by itself when the time runs out, or with `--release`. Then the longest-waiting window opens. `--release` alone ends whatever is open; with `--chat` it ends only that chat's window, open or waiting. With nothing to end it returns `"quiet": null` and exit `0`.
+- A window survives a restart of Knock. An expired one is kept briefly as history (`end_reason`: `released`, `expired`, `cancelled` or `timed_out`).
+
+| Code | Meaning |
+| --- | --- |
+| `0` | The window is open, or `--release`, `--status` or `--detach` succeeded. |
+| `4` | It gave up waiting; the window never opened. |
+| `5` | Validation or connection error. A lost wait includes `quiet_id`. |
+| `7` | Still waiting when the wait ended. |
+
+The response is `{"ok":true,"quiet":{...},"queue":{...},"presence":{...},"quiet_window":{...}}`; `queue` appears only while waiting, with the same fields as a request's. `quiet` has `id`, `chat`, `reason`, `minutes`, `status` (`open`, `waiting` or `ended`), `created_at`, and `opened_at` and `until` once open. `--status` returns `quiet_window` and `waiting`, the line with each one's place.
+
+`quiet_window` is `{"open":false,"waiting":0}`, or when open: `open`, `id`, `chat`, `reason`, `opened_at`, `until`, `remaining_seconds`, `waiting`. It is in every request's response, `start`, `update`, `quiet` and `status`.
 
 ## Report a finished job
 

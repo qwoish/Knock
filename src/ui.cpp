@@ -281,6 +281,7 @@ private:
         std::vector<Json> pending;
         Json job, done, answered, agent;
         bool running = false;
+        bool queued = false; // Waiting, but behind a lease: nothing to answer yet.
         std::int64_t activity = 0;
         std::int64_t since = 0;
     };
@@ -316,7 +317,7 @@ private:
     HWND presence_edit_ = nullptr;
     HWND task_entry_edit_ = nullptr;
     RECT tasks_rect_{}, middle_rect_{}, notes_rect_{}, arrow_rect_{};
-    RECT lease_text_{}, quiet_text_{}, feedback_rect_{}, agents_heading_{};
+    RECT lease_text_{}, quiet_text_{}, feedback_rect_{}, agents_heading_{}, quiet_band_{};
     int strip_bottom_ = 0;
     int full_width_ = 0;
     int filter_line_y_ = 0;
@@ -334,7 +335,7 @@ private:
     int row_text_width_ = 0;
     int list_lead_ = 0;
     int first_done_row_ = -1;
-    std::size_t waiting_count_ = 0, working_count_ = 0, done_count_ = 0;
+    std::size_t waiting_count_ = 0, queued_count_ = 0, working_count_ = 0, done_count_ = 0;
     int cards_scroll_ = 0, cards_extent_ = 0;
     std::string copied_key_;
     ULONGLONG copied_until_ = 0;
@@ -2650,7 +2651,7 @@ private:
                 if (!snapshot_["lease"].is_null()) mutate({{"op", "request.release"}, {"id", snapshot_["lease"]["id"]}});
             });
             cluster -= px(76) + px(6);
-            lease_text_ = RECT{cluster - px(150), strip_top, cluster, strip_top + strip_h};
+            lease_text_ = RECT{cluster - px(170), strip_top, cluster, strip_top + strip_h};
             cluster = lease_text_.left - px(10);
         }
         const char* states[]{"at_pc", "away", "busy"};
@@ -2751,7 +2752,17 @@ private:
         // The first column shows the agents, or the page opened from a side column.
         // The agents heading belongs to this window, so a scrolled list clips below it.
         agents_heading_ = RECT{middle_rect_.left, middle_rect_.top, middle_rect_.right, middle_rect_.top + header};
-        const int content_top = dashboard() ? agents_heading_.bottom : middle_rect_.top;
+        int content_top = dashboard() ? agents_heading_.bottom : middle_rect_.top;
+        // A timed run has a line of its own above the list while it is open.
+        quiet_band_ = RECT{};
+        if (dashboard() && quiet_window_view(snapshot_, now_ms()).value("open", false)) {
+            quiet_band_ = RECT{middle_rect_.left, content_top, middle_rect_.right - px(8), content_top + px(28)};
+            button("quiet-window-end", window_, L"END QUIET", rect(quiet_band_.right - px(90), quiet_band_.top + px(1), px(88), px(26)), [this] {
+                const auto open = quiet_window_view(snapshot_, now_ms());
+                if (open.value("open", false)) mutate({{"op", "quiet.release"}, {"id", open["id"]}});
+            });
+            content_top = quiet_band_.bottom + px(4);
+        }
         int content_bottom = middle_rect_.bottom;
         if (dashboard()) {
             build_cards();
@@ -3292,24 +3303,32 @@ private:
             std::sort(card.pending.begin(), card.pending.end(), [](const Json& a, const Json& b) {
                 return a.value("created_at", std::int64_t(0)) < b.value("created_at", std::int64_t(0));
             });
+            // What can be answered now comes first, so a question from this chat is
+            // never stuck behind its own request for the mouse and keyboard.
+            std::stable_partition(card.pending.begin(), card.pending.end(), [&](const Json& request) {
+                return !input_request_queued(snapshot_, request);
+            });
+            card.queued = !card.pending.empty() && input_request_queued(snapshot_, card.pending.front());
             // Finishing wins over older activity; anything newer means the job
             // carried on after reporting, so it goes back to work.
             card.state = !card.pending.empty() ? "waiting" : !card.done.is_null() && finished >= others ? "done" : "working";
             // The list stays still while work goes on: a working row keeps the place
             // its start gave it, so a status update never reorders the list.
-            card.since = card.state == "waiting" ? card.pending.back().value("created_at", std::int64_t(0)) :
+            card.since = card.queued ? card.pending.front().value("created_at", std::int64_t(0)) :
+                card.state == "waiting" ? card.pending.back().value("created_at", std::int64_t(0)) :
                 card.state == "done" ? finished :
                 !card.agent.is_null() ? card.agent.value("started_at", std::int64_t(0)) : card.activity;
             cards_.push_back(std::move(card));
         }
-        auto rank = [](const Card& card) { return card.state == "waiting" ? 0 : card.state == "working" ? 1 : 2; };
+        // Those who need an answer, then the line in its own order, then the rest.
+        auto rank = [](const Card& card) { return card.queued ? 1 : card.state == "waiting" ? 0 : card.state == "working" ? 2 : 3; };
         std::stable_sort(cards_.begin(), cards_.end(), [&](const Card& a, const Card& b) {
             if (rank(a) != rank(b)) return rank(a) < rank(b);
-            return a.since > b.since;
+            return a.queued ? a.since < b.since : a.since > b.since;
         });
-        waiting_count_ = working_count_ = done_count_ = 0;
+        waiting_count_ = queued_count_ = working_count_ = done_count_ = 0;
         for (const auto& card : cards_)
-            ++(card.state == "waiting" ? waiting_count_ : card.state == "working" ? working_count_ : done_count_);
+            ++(card.queued ? queued_count_ : card.state == "waiting" ? waiting_count_ : card.state == "working" ? working_count_ : done_count_);
     }
     int card_index(const std::string& id) const {
         for (std::size_t i = 0; i < cards_.size(); ++i) {
@@ -3340,6 +3359,7 @@ private:
     static std::wstring request_outcome(const Json& request) {
         const auto status = get_string(request, "status");
         const bool question = get_string(request, "kind") == "question";
+        if (status == "approved" && get_string(request, "granted_by") == "away") return L"Away: mouse and keyboard granted";
         if (status == "approved") return question ? L"Answered yes" : L"Yes: mouse and keyboard granted";
         if (status == "denied") return L"Answered no";
         if (status == "custom") return L"Replied";
@@ -3361,6 +3381,14 @@ private:
                 L"Mouse and keyboard for " + std::to_wstring(std::max<std::int64_t>(1, request.value("lease_seconds", 300) / 60)) + L" min";
             meta += L" \u00B7 expires in " + remaining_time(request.value("expires_at", std::int64_t(0)));
             if (card.pending.size() > 1) meta += L" \u00B7 +" + std::to_wstring(card.pending.size() - 1) + L" more";
+            if (card.queued) {
+                const auto place = input_queue_place(snapshot_, request, now_ms());
+                if (!place.is_null()) {
+                    const auto wait = std::max<std::int64_t>(1, (place.value("expected_wait_seconds", std::int64_t(0)) + 59) / 60);
+                    meta = L"Place " + std::to_wstring(place.value("position", 1)) + L" in line, about " +
+                           std::to_wstring(wait) + L" min \u00B7 " + meta;
+                }
+            }
             return {widen(get_string(request, "message")), meta};
         }
         if (card.state == "done") return {widen(get_string(card.done, "summary")), widen(get_string(card.done, "report"))};
@@ -3443,7 +3471,7 @@ private:
         row_text_width_ = width - row_text_left() - px(30) - (row_stacked_ ? 0 : px(action_logical) + px(12));
         const int pad = px(8), small_line = line_height(small_font_), body_line = line_height(body_font_);
         rows_.clear();
-        const bool idle = waiting_count_ + working_count_ == 0 && done_count_ > 0;
+        const bool idle = waiting_count_ + queued_count_ + working_count_ == 0 && done_count_ > 0;
         list_lead_ = idle ? px(30) : 0;
         int y = list_lead_;
         auto add_row = [&](std::size_t index) {
@@ -3470,9 +3498,11 @@ private:
         for (const auto& row : rows_) {
             const auto& card = cards_[row.card];
             summary += (summary.size() == 6 ? L": " : L" | ") +
-                std::wstring(card.state == "waiting" ? L"WAITING " : card.state == "done" ? L"DONE " : L"WORKING ") + widen(card.chat);
+                std::wstring(card.queued ? L"QUEUED " : card.state == "waiting" ? L"WAITING " : card.state == "done" ? L"DONE " : L"WORKING ") + widen(card.chat);
         }
         if (done_count_ && !done_open_) summary += L" (" + std::to_wstring(done_count_) + L" done, closed)";
+        const auto quiet = quiet_window_view(snapshot_, now_ms());
+        if (quiet.value("open", false)) summary += L" | QUIET WINDOW " + widen(quiet.value("chat", ""));
         SetWindowTextW(content_, summary.c_str());
         cards_scroll_ = std::clamp(cards_scroll_, 0, std::max(0, cards_extent_ - static_cast<int>(area.bottom)));
 
@@ -3504,8 +3534,7 @@ private:
                     button(id + "saved-replies", content_, L"SAVED", third(1), [this] { use_saved_reply(); });
                     button(id + "cancel", content_, L"CANCEL", third(2), [this] { cancel_reply(); });
                 } else {
-                    const bool available = get_string(request, "kind") != "input" || snapshot_["lease"].is_null();
-                    button(id + "yes", content_, L"YES", third(0), [this, id] { resolve(id, "approved"); }, available);
+                    button(id + "yes", content_, L"YES", third(0), [this, id] { resolve(id, "approved"); }, !card.queued);
                     button(id + "custom", content_, L"CUSTOM", third(1), [this, id] { begin_reply(id); });
                     button(id + "no", content_, L"NO", third(2), [this, id] { resolve(id, "denied"); });
                 }
@@ -3561,6 +3590,7 @@ private:
                        heading, heading_ink, false);
             std::wstring counts;
             if (waiting_count_) counts += std::to_wstring(waiting_count_) + L" waiting";
+            if (queued_count_) counts += (counts.empty() ? L"" : L" \u00B7 ") + std::to_wstring(queued_count_) + L" queued";
             if (working_count_) counts += (counts.empty() ? L"" : L" \u00B7 ") + std::to_wstring(working_count_) + L" working";
             text(dc, counts, RECT{agents_heading_.left + px(100), agents_heading_.top, agents_heading_.right, agents_heading_.top + px(24)},
                  small_font_, waiting_count_ ? orange : subdued, DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
@@ -3572,8 +3602,33 @@ private:
             const auto left = std::max<std::int64_t>(0, (lease.value("until", std::int64_t(0)) - now_ms()) / 1000);
             wchar_t clock[16]{};
             swprintf_s(clock, L"%lld:%02lld", static_cast<long long>(left / 60), static_cast<long long>(left % 60));
-            text(dc, L"INPUT " + widen(get_string(lease, "chat")) + L" " + clock, lease_text_, small_font_, orange,
+            std::size_t line = 0;
+            for (const auto& request : snapshot_["requests"])
+                if (get_string(request, "kind") == "input" && get_string(request, "status") == "pending") ++line;
+            // The clock and the line must stay readable, so a long name gives way first.
+            const std::wstring ending = std::wstring(L" ") + clock + (line ? L" +" + std::to_wstring(line) : L"");
+            const int ending_w = text_width(ending, small_font_);
+            RECT name_box = lease_text_;
+            name_box.right -= ending_w;
+            text(dc, L"INPUT " + widen(get_string(lease, "chat")), name_box, small_font_, orange,
                  DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+            text(dc, ending, RECT{name_box.right, lease_text_.top, lease_text_.right, lease_text_.bottom}, small_font_, orange,
+                 DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        }
+        if (quiet_band_.right > quiet_band_.left) {
+            const auto quiet = quiet_window_view(snapshot_, now_ms());
+            fill(dc, quiet_band_, well);
+            fill(dc, RECT{quiet_band_.left, quiet_band_.top, quiet_band_.left + std::max(3, px(3)), quiet_band_.bottom}, blue);
+            const auto left = quiet.value("remaining_seconds", std::int64_t(0));
+            wchar_t clock[16]{};
+            swprintf_s(clock, L"%lld:%02lld", static_cast<long long>(left / 60), static_cast<long long>(left % 60));
+            auto line = L"QUIET WINDOW  " + widen(quiet.value("chat", "")) + L"  until " +
+                display_time(quiet.value("until", std::int64_t(0))) + L" (" + clock + L")";
+            // The reason can be long, so it goes last and gives way first.
+            if (const auto waiting = quiet.value("waiting", 0)) line += L"  +" + std::to_wstring(waiting) + L" waiting";
+            line += L"  " + widen(quiet.value("reason", ""));
+            text(dc, line, RECT{quiet_band_.left + px(10), quiet_band_.top, quiet_band_.right - px(98), quiet_band_.bottom},
+                 small_font_, blue, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
         }
         if (quiet_text_.right > quiet_text_.left)
             text(dc, L"QUIET " + remaining_time(busy_deadline()), quiet_text_, small_font_, muted,
@@ -3804,7 +3859,7 @@ private:
             const int top = row.top - cards_scroll_;
             if (top + row.height < 0 || top > area.bottom) continue;
             const bool waiting = card.state == "waiting", done = card.state == "done";
-            const COLORREF tone = waiting ? orange : done ? green : blue;
+            const COLORREF tone = card.queued ? muted : waiting ? orange : done ? green : blue;
             const RECT box{0, top, width, top + row.height};
             fill(dc, box, well);
             fill(dc, RECT{0, top, std::max(3, px(3)), box.bottom}, tone);
@@ -3820,7 +3875,7 @@ private:
             const int available = std::max(px(40), right - left - when_w - px(84));
             const int name_w = std::min(available, pixel_printable(name) ? pixel_width(name, scale) : text_width(name, title_font_));
             pixel_text(dc, name, RECT{left, top + pad, left + name_w, top + pad + px(18)}, scale, foreground, false);
-            text(dc, waiting ? L"WAITING" : done ? L"DONE" : L"WORKING",
+            text(dc, card.queued ? L"QUEUED" : waiting ? L"WAITING" : done ? L"DONE" : L"WORKING",
                  RECT{left + name_w + px(10), top + pad, left + name_w + px(84), top + pad + px(18)}, small_font_, tone,
                  DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
             text(dc, !done && !waiting && !card.agent.is_null() ? L"started " + when : when,
@@ -4245,7 +4300,8 @@ private:
                 update_busy_mode();
                 if (window_shown(window_)) {
                     // The lease clock ticks; the times in the list move on each minute.
-                    if (busy() || !snapshot_["lease"].is_null()) InvalidateRect(window_, nullptr, FALSE);
+                    if (busy() || !snapshot_["lease"].is_null() || quiet_band_.right > quiet_band_.left)
+                        InvalidateRect(window_, nullptr, FALSE);
                     if (busy() && settings_open_) InvalidateRect(content_, nullptr, FALSE);
                     if (++seconds_shown_ >= 30) {
                         seconds_shown_ = 0;

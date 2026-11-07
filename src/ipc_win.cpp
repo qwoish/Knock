@@ -150,7 +150,7 @@ void finish_connection(HANDLE pipe, HANDLE stop, DWORD timeout = 2000) {
 }
 
 DWORD response_timeout(const Json& command) {
-    if (command.is_object() && command.value("op", "") == "request.wait") {
+    if (command.is_object() && (command.value("op", "") == "request.wait" || command.value("op", "") == "quiet.wait")) {
         const auto seconds = std::clamp<std::int64_t>(
             command.value("wait_seconds", std::int64_t{86400}), 1, 86400);
         return static_cast<DWORD>(seconds * 1000 + 10000);

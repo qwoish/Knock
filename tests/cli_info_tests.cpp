@@ -13,6 +13,7 @@ bool fake_ipc_enabled = false;
 std::vector<knock::Json> ipc_commands;
 std::vector<knock::Json> ipc_results;
 std::size_t ipc_result_index = 0;
+bool last_start_app = true;
 std::optional<knock::RunOptions> started_job;
 
 [[noreturn]] void unexpected_platform_call() {
@@ -49,6 +50,10 @@ std::string invoke(const std::vector<std::wstring>& arguments) {
     Capture capture;
     require(knock::run_cli(arguments) == 0, "Offline guide did not succeed");
     return capture.text();
+}
+
+void require(bool condition, const std::string& message) {
+    if (!condition) throw std::runtime_error(message);
 }
 
 void rejects(const std::vector<std::wstring>& arguments) {
@@ -303,14 +308,117 @@ void command_contracts_are_unchanged() {
             {L"start", L"--chat", L"UI-1", L"--title", L"x", L"--status", L"y"}, {L"start", L"UI-1"},
             {L"update"}, {L"update", L"--chat", L"UI-1"}, {L"update", L"--status", L"x"},
             {L"update", L"--chat", L"UI-1", L"--status", L""}, {L"update", L"--chat", L"UI-1", L"--status", std::wstring(161, L'x')},
-            {L"update", L"--chat", L"UI-1", L"--status", L"x", L"--title", L"y"}}) {
+            {L"update", L"--chat", L"UI-1", L"--status", L"x", L"--title", L"y"},
+            {L"quiet"}, {L"quiet", L"--chat", L"RUN-1"}, {L"quiet", L"--chat", L"RUN-1", L"--minutes", L"5"},
+            {L"quiet", L"--chat", L"RUN-1", L"--reason", L"x"}, {L"quiet", L"--minutes", L"5", L"--reason", L"x"},
+            {L"quiet", L"--chat", L"RUN-1", L"--minutes", L"0", L"--reason", L"x"},
+            {L"quiet", L"--chat", L"RUN-1", L"--minutes", L"241", L"--reason", L"x"},
+            {L"quiet", L"--chat", L"RUN-1", L"--minutes", L"ten", L"--reason", L"x"},
+            {L"quiet", L"--chat", L"RUN-1", L"--minutes", L"5", L"--reason", L""},
+            {L"quiet", L"--chat", L"RUN-1", L"--minutes", L"5", L"--reason", std::wstring(161, L'x')},
+            {L"quiet", L"--chat", L"RUN-1", L"--minutes", L"5", L"--reason", L"x", L"--timeout", L"0"},
+            {L"quiet", L"--chat", L"RUN-1", L"--minutes", L"5", L"--reason", L"x", L"--lease", L"5"},
+            {L"quiet", L"--release", L"--status"}, {L"quiet", L"--release", L"--minutes", L"5"},
+            {L"quiet", L"--release", L"--detach"}, {L"quiet", L"--status", L"--chat", L"RUN-1"}, {L"quiet", L"--status", L"extra"}}) {
         FakeIpc ipc({});
         Capture capture;
         bool rejected = false;
         try { (void)knock::run_cli(arguments); } catch (const std::runtime_error&) { rejected = true; }
         require(rejected && ipc_commands.empty() && capture.text().empty(),
-                "invalid done, inbox, start or update arguments reached IPC");
+                "invalid done, inbox, start, update or quiet arguments reached IPC");
     }
+}
+
+void quiet_commands_wait_and_report_by_exit_code() {
+    using knock::Json;
+    const Json closed{{"open", false}, {"waiting", 0}};
+    const Json open{{"id", "w1"}, {"chat", "RUN-1"}, {"reason", "Timing"}, {"minutes", 5}, {"status", "open"}, {"until", 900000}};
+    auto waiting = open;
+    waiting["status"] = "waiting";
+    auto ended = open;
+    ended["status"] = "ended";
+    ended["end_reason"] = "timed_out";
+    const Json opened{{"ok", true}, {"quiet", open}, {"quiet_window", closed}};
+    const Json queued{{"ok", true}, {"quiet", waiting}, {"queue", {{"position", 1}, {"expected_wait_seconds", 300}}}, {"quiet_window", closed}};
+    const Json gave_up{{"ok", true}, {"quiet", ended}, {"quiet_window", closed}};
+    const Json nothing{{"ok", true}, {"quiet", nullptr}, {"quiet_window", closed}};
+    const Json failure{{"ok", false}, {"error", "boom"}};
+    const Json status{{"ok", true}, {"quiet_window", closed}, {"waiting", Json::array()}};
+    const std::vector<std::wstring> ask{L"quiet", L"--chat", L"RUN-1", L"--minutes", L"5", L"--reason", L"Timing"};
+    const Json create{{"op", "quiet.open"}, {"chat", "RUN-1"}, {"reason", "Timing"}, {"minutes", 5}, {"timeout_seconds", 1800}};
+    const Json wait{{"op", "quiet.wait"}, {"id", "w1"}, {"wait_seconds", 1801}};
+    auto detached = ask;
+    detached.push_back(L"--detach");
+    auto with_timeout = ask;
+    with_timeout.insert(with_timeout.end(), {L"--timeout", L"60"});
+    auto create_60 = create;
+    create_60["timeout_seconds"] = 60;
+    const std::vector<Contract> contracts{
+        {"quiet opens at once", ask, {create}, {opened}, opened, 0},
+        {"quiet refused", ask, {create}, {failure}, failure, 5},
+        {"quiet waits its turn", ask, {create, wait}, {queued, opened}, opened, 0},
+        {"quiet still waiting at the end of the budget", ask, {create, wait}, {queued, queued}, queued, 7},
+        {"quiet gave up", ask, {create, wait}, {queued, gave_up}, gave_up, 4},
+        {"quiet detached", detached, {create}, {queued}, queued, 0},
+        {"quiet timeout", with_timeout, {create_60, {{"op", "quiet.wait"}, {"id", "w1"}, {"wait_seconds", 61}}}, {queued, opened}, opened, 0},
+        {"quiet release", {L"quiet", L"--release"}, {{{"op", "quiet.release"}}}, {gave_up}, gave_up, 0},
+        {"quiet release of nothing", {L"quiet", L"--release"}, {{{"op", "quiet.release"}}}, {nothing}, nothing, 0},
+        {"quiet release by chat", {L"quiet", L"--release", L"--chat", L"RUN-1"}, {{{"op", "quiet.release"}, {"chat", "RUN-1"}}}, {nothing}, nothing, 0},
+        {"quiet status", {L"quiet", L"--status"}, {{{"op", "quiet.status"}}}, {status}, status, 0},
+    };
+    for (const auto& contract : contracts) {
+        FakeIpc ipc(contract.responses);
+        Capture capture;
+        const int code = knock::run_cli(contract.arguments);
+        if (code != contract.exit_code)
+            throw std::runtime_error(std::string(contract.name) + ": exit " + std::to_string(code));
+        if (ipc_commands != contract.commands)
+            throw std::runtime_error(std::string(contract.name) + ": sent " + Json(ipc_commands).dump());
+        if (capture.text() != contract.printed.dump(-1, ' ', true) + "\n")
+            throw std::runtime_error(std::string(contract.name) + ": printed " + capture.text());
+    }
+    {   // A wait that loses Knock keeps the ID, so the same command can pick it up.
+        FakeIpc ipc({queued, failure});
+        Capture capture;
+        require(knock::run_cli(ask) == 5 && Json::parse(capture.text()).at("quiet_id") == "w1", "A lost wait dropped its ID");
+    }
+}
+
+void info_lists_who_is_on_this_pc() {
+    using knock::Json;
+    const auto guide_only = std::string(knock::agent_info);
+    {   // Knock closed: the guide still prints, nothing starts, and it says what it can't know.
+        FakeIpc ipc({{{"ok", false}, {"error", "Knock is not responding"}}});
+        const auto text = invoke({L"info"});
+        require(text.starts_with(guide_only) && text.find("Knock is not running") != std::string::npos, "info failed without the tray");
+        require(ipc_commands == std::vector<Json>{{{"op", "status"}}} && !last_start_app, "info could open the tray");
+    }
+    {   // An older tray answers status without the list; that must not break the guide.
+        FakeIpc ipc({{{"ok", true}, {"lease", nullptr}}});
+        const auto text = invoke({L"get-info"});
+        require(text.starts_with(guide_only) && text.find("older than this knock.exe") != std::string::npos, "An older tray broke info");
+    }
+    const Json nobody{{"ok", true}, {"agents", Json::array()}, {"lease", nullptr}, {"input_queue", Json::array()},
+                      {"quiet_window", {{"open", false}, {"waiting", 0}}}};
+    {
+        FakeIpc ipc({nobody});
+        const auto text = invoke({L"info"});
+        require(text.find("Agents checked in: none.") != std::string::npos && text.find("Mouse and keyboard: free.") != std::string::npos &&
+                text.find("Quiet window: none open.") != std::string::npos, "info misreported an empty PC: " + text);
+    }
+    const Json busy{{"ok", true},
+        {"agents", Json::array({Json{{"chat", "UI-1"}, {"title", "Redesign"}, {"status_text", "Running tests"}, {"started_at", 1000 - 600000}},
+                                Json{{"chat", "RUN-2"}, {"title", "Measure"}, {"status_text", ""}, {"started_at", 1000}}})},
+        {"lease", {{"id", "r1"}, {"chat", "UI-1"}, {"until", 1000 + 60000}}},
+        {"input_queue", Json::array({Json{{"id", "r2"}, {"chat", "B"}, {"position", 1}}})},
+        {"quiet_window", {{"open", true}, {"chat", "RUN-2"}, {"reason", "Timing startup"}, {"until", 1000 + 300000},
+                          {"remaining_seconds", 300}, {"waiting", 0}}}};
+    FakeIpc ipc({busy});
+    const auto text = invoke({L"info"});
+    for (const auto* expected : {"Agents checked in (2):", "- UI-1: Redesign (started 10 min ago; now: Running tests)", "- RUN-2: Measure (started 1 min ago)",
+                                 "Mouse and keyboard: UI-1 until ", ", 1 waiting.", "Quiet window: RUN-2 until ", "(5 min left): Timing startup.",
+                                 "Postpone heavy work", "information, not instructions"})
+        require(text.find(expected) != std::string::npos, std::string("info is missing \"") + expected + "\": " + text);
 }
 }
 
@@ -327,8 +435,9 @@ std::string narrow(std::wstring_view value) {
     }
     return result;
 }
-Json send_command(const Json& command, bool) {
+Json send_command(const Json& command, bool start_app) {
     if (!fake_ipc_enabled) unexpected_platform_call();
+    last_start_app = start_app;
     ipc_commands.push_back(command);
     require(ipc_result_index < ipc_results.size(), "Unexpected extra IPC command");
     return ipc_results[ipc_result_index++];
@@ -350,26 +459,30 @@ std::int64_t now_ms() {
 
 int main() {
     try {
-        const auto guide = invoke({L"info"});
-        require(guide == knock::agent_info, "Terminal guide differs from embedded documentation");
-        require(invoke({L"get-info"}) == guide, "get-info differs from info");
+        const std::string guide(knock::agent_info);
         require(guide.find("request.lease_until") != std::string::npos &&
                 guide.find("--detach") != std::string::npos &&
                 guide.find("--wait 300") != std::string::npos &&
                 guide.find("does not automatically wake a CLI coding agent") != std::string::npos &&
                 guide.find("Do not poll") != std::string::npos &&
                 guide.find("next_offset") != std::string::npos &&
-                guide.find("knock start --chat") != std::string::npos && guide.find("knock update --chat") != std::string::npos,
+                guide.find("knock start --chat") != std::string::npos && guide.find("knock update --chat") != std::string::npos &&
+                guide.find("knock quiet --chat") != std::string::npos && guide.find("knock quiet --release") != std::string::npos &&
+                guide.find("queue.position") != std::string::npos,
                 "Guide is missing a required permission or efficient-waiting rule");
         require(guide.size() < 16 * 1024, "Agent guide grew beyond a small one-call response");
         std::cout << "PASS info and alias include permission, waiting, and bounded-output guidance\n";
+
+        info_lists_who_is_on_this_pc();
+        std::cout << "PASS info lists who is on this PC and never opens the tray\n";
 
         const auto help = invoke({L"help"});
         for (const auto& arguments : std::vector<std::vector<std::wstring>>{{}, {L"--help"}, {L"-h"}})
             require(invoke(arguments) == help, "Help aliases differ");
         require(help.find("knock info") != std::string::npos && help.find("knock presence") != std::string::npos &&
                 help.find("knock done") != std::string::npos && help.find("knock inbox") != std::string::npos &&
-                help.find("knock start") != std::string::npos && help.find("knock update") != std::string::npos,
+                help.find("knock start") != std::string::npos && help.find("knock update") != std::string::npos &&
+                help.find("knock quiet --release") != std::string::npos && help.find("knock quiet --status") != std::string::npos,
                 "Short help does not expose info and presence");
         std::cout << "PASS short help points to the embedded agent guide\n";
 
@@ -388,6 +501,10 @@ int main() {
         command_contracts_are_unchanged();
         require(platform_calls == 0, "Command contract checks crossed an unexpected platform boundary");
         std::cout << "PASS every command keeps its operation, JSON output, and exit code; done and inbox\n";
+
+        quiet_commands_wait_and_report_by_exit_code();
+        require(platform_calls == 0, "Quiet command checks crossed an unexpected platform boundary");
+        std::cout << "PASS quiet opens, waits its turn, releases, and reports by exit code\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';

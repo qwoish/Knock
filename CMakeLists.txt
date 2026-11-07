@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Knock VERSION 0.8.0 LANGUAGES CXX)
+project(Knock VERSION 0.9.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -175,7 +175,7 @@ if(WIN32)
         docs/CLI.md docs/AGENT_INSTRUCTIONS.md DESTINATION docs)
     install(FILES docs/screenshots/agents-100.png docs/screenshots/agents-125.png
         docs/screenshots/agents-150.png docs/screenshots/agents-done-open.png
-        docs/screenshots/agents-notes-collapsed.png
+        docs/screenshots/agents-notes-collapsed.png docs/screenshots/agents-queue-quiet.png
         DESTINATION docs/screenshots)
     install(FILES third_party/nlohmann-LICENSE.txt DESTINATION licenses)
 endif()

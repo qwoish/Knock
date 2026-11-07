@@ -20,7 +20,9 @@ rarely; it is not a heartbeat.
 knock update --chat AUDIO-1 --status "Running the mixer tests"
 ```
 
-Both print the record and the person's `presence`, and neither grants input.
+Both print the record, the person's `presence` and `quiet_window`, and neither
+grants input. The end of `knock info` lists who else is checked in on this PC, who
+has the mouse and keyboard, and any quiet window.
 
 ## Ask before using desktop input
 
@@ -30,13 +32,40 @@ Before moving the mouse, clicking, scrolling, or typing for interface tests:
 knock request --chat AUDIO-1 --message "May I use the mouse and keyboard for interface tests? About 3 minutes." --lease 180
 ```
 
-This command normally waits for a reply from the tray. When presence is `away`
-or `busy`, it queues the request and, if still pending, returns immediately with
-`pending`, exit code `7`, and `wait_reason: "presence"`. A pending request already
-waiting also returns that way if presence changes to Away or Busy. An answer or
-expiry takes precedence. Retain the request ID and read the
-`presence.message`; continue independent work or end the turn. Do not create a
-duplicate request or poll for a return to At PC.
+Ask this way every time, even while the person is away: one agent holds the lease
+at a time, and Knock can only keep two agents apart if both ask. Ask when the input
+session is ready to start, for an honest length, and release it the moment you stop.
+
+This command normally waits for a reply from the tray. While presence is `away`
+and its message does not withhold input, Knock grants the lease without asking:
+`status` is `approved` and `granted_by` is `away`. A message that withholds input,
+such as "no input" or "headless tests only", leaves the request with the person.
+When presence is `busy`, or `away` with input withheld, it queues the request and,
+if still pending, returns immediately with `pending`, exit code `7`, and
+`wait_reason: "presence"`. A pending request already waiting also returns that way
+if presence changes to Away or Busy. If that happens while the person is away and
+input is not withheld, `knock cancel` it and ask again to take your turn. An answer
+or expiry takes precedence. Retain the request ID and read the `presence.message`;
+continue independent work or end the turn. Do not create a duplicate request or poll
+for a return to At PC. Stop and release as soon as presence changes to `at_pc` or
+its message changes, even if your lease has time left.
+
+### Waiting in line
+
+If another agent holds the lease, your request waits its turn. It keeps the same
+command and the same ID; do not ask again. The JSON has `queue.position` (1 is next),
+`queue.ahead`, `queue.holder`, `queue.expected_wait_seconds`, `queue.expected_at` and
+`queue.may_expire_first`. The expected wait adds up the time left on the lease and the
+leases asked for ahead of you; it does not count the time the person takes to answer.
+If `may_expire_first` is `true`, your `--timeout` ends before your likely turn.
+
+When your turn comes the request goes to the person, or is granted if they are away,
+and the waiting command returns. Away never makes a queued request give up its place.
+Busy returns `pending` and exit `7` with your place, and the turn then waits for the
+person. Questions (`--kind question`) are never queued. While you wait, do other work
+if the host allows it; do not poll. `--detach` returns your place at once, and a lease
+granted later starts its clock when your turn comes, so read it with
+`knock result REQUEST_ID --wait SECONDS` rather than coming back much later.
 
 If the host can keep a tool call open while presence allows waiting, let that
 one call wait. A waiting Knock process does not need repeated model turns.
@@ -54,11 +83,42 @@ knock release REQUEST_ID
 A `denied`, `custom`, `pending`, cancelled, expired, or error result grants no
 input permission. For `custom`, read `request.response` and follow the
 reply: "continue with headless tests" means work without desktop input.
-Saved replies are also custom answers. Presence and quiet mode do not approve requests
-or extend their expiry. Knock coordinates cooperating agents; it is not an OS
-input lock. Only the tray interface may approve or deny requests.
+Saved replies are also custom answers. Busy, At PC and the notification Quiet timer
+never approve requests or extend their expiry; only Away grants, as above. Knock
+coordinates cooperating agents; it is not an OS input lock. Only the tray interface
+may answer a request; no command can.
 
 For a question that needs no mouse or keyboard, add `--kind question`.
+
+## Quiet windows for timed runs
+
+Before a timed measurement, announce it so others hold off:
+
+```text
+knock quiet --chat AUDIO-1 --minutes 10 --reason "Timing the mixer startup"
+```
+
+Exit `0` means your window is open: `quiet.until` is when it ends by itself. Run your
+measurement, then end it at once, even if it failed:
+
+```text
+knock quiet --release --chat AUDIO-1
+```
+
+One is open at a time. A second waits like a lease: the command blocks until its turn
+(`--timeout`, default 1800 seconds) without polling, its JSON has the same `queue`
+fields, and its minutes start when it opens. Exit `7` means still waiting (after
+`--detach` prints the place with exit `0`, run the same command again to wait); exit
+`4` means it gave up, and its window never opened. A second `knock quiet` from the same
+chat keeps the window it has and does not extend it.
+
+Every request's JSON, `knock start`, `knock update`, `knock status`, `knock quiet
+--status` and `knock info` say `quiet_window`: `open`, `chat`, `reason`, `until`,
+`remaining_seconds`, `waiting`. When `open` is `true` and it is not yours, postpone heavy
+work (builds, indexing, wide searches, test suites) until `until`, or do something light
+meanwhile. Light reads and short commands are fine. A quiet window is an announcement;
+it blocks nothing and is unrelated to the person's notification Quiet timer. It grants
+no input. `--minutes` is 1 to 240: ask for an honest length with a small margin.
 
 ## Read availability when it helps
 
@@ -70,9 +130,9 @@ first status is set. `updated_at` is the Unix-millisecond time it was last
 changed, or `0` when unset.
 
 Presence is set only in the tray interface and survives restart. It is not
-an idle detector, a permission decision, or a promise of an automatic return.
-Treat its message as context for scheduling work, never as permission to use
-desktop input. At PC still requires an approved, unexpired input lease.
+an idle detector or a promise of an automatic return. Treat its message as context
+for scheduling work. Desktop input always takes an approved, unexpired input lease;
+read it from the request's JSON, not from presence or its message.
 Switching back does not automatically resume an agent or resolve a request.
 
 ## If the host has a short tool timeout

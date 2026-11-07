@@ -6,6 +6,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -107,6 +108,10 @@ struct App {
     }
     // Runs the real CLI, as an agent does.
     Output cli(const std::vector<std::wstring>& arguments) const {
+        auto [code, bytes] = raw_cli(arguments);
+        return {code, Json::parse(bytes)};
+    }
+    std::pair<int, std::string> raw_cli(const std::vector<std::wstring>& arguments) const {
         std::vector<std::wstring> full{(folder / L"knock.exe").wstring()};
         full.insert(full.end(), arguments.begin(), arguments.end());
         auto line = knock::command_line(full);
@@ -132,7 +137,7 @@ struct App {
         DWORD code = 0;
         GetExitCodeProcess(child.hProcess, &code);
         CloseHandle(child.hProcess);
-        return {static_cast<int>(code), Json::parse(bytes)};
+        return {static_cast<int>(code), bytes};
     }
     Json good(const std::vector<std::wstring>& arguments) const {
         auto output = cli(arguments);
@@ -191,6 +196,7 @@ void fits_at(const wchar_t* dpi, bool small) {
     app.good({L"request", L"--chat", L"ASK-2", L"--kind", L"question", L"--message", L"Short question?", L"--detach"});
     app.good({L"notify", L"--chat", L"NOTICE-1", L"--message", L"Build finished."});
     app.good({L"done", L"--chat", L"OLD-1", L"--summary", L"Finished.", L"--report", L"C:\\a\\very\\long\\path\\to\\a\\report\\that\\keeps\\going\\report.md"});
+    app.good({L"quiet", L"--chat", L"A-VERY-LONG-JOB-NAME-THAT-KEEPS-GOING-AND-GOING-AND-GOING-123456", L"--minutes", L"30", L"--reason", knock::widen(long_title)});
     settle(app.root);
     everything_fits(app.root, app.list, label + " agents");
     click(app.root, L"DONE (1)");
@@ -212,6 +218,118 @@ void fits_at(const wchar_t* dpi, bool small) {
 }
 // Timestamps are in milliseconds; keep start order unambiguous.
 void tick() { std::this_thread::sleep_for(5ms); }
+
+std::string lease_holder() {
+    const auto lease = knock::send_command({{"op", "status"}}, false).at("lease");
+    return lease.is_null() ? std::string() : lease.at("chat").get<std::string>();
+}
+
+// The real CLI against the real window: the line for the mouse and keyboard.
+void input_queue_on_the_panel() {
+    App app;
+    const auto first = app.good({L"request", L"--chat", L"LEASE-1", L"--message", L"May I?", L"--lease", L"120", L"--detach"});
+    app.shows(L"Agents: WAITING LEASE-1");
+    require(!first.contains("queue"), "Nothing is ahead of the first request");
+    click(app.root, L"YES");
+    eventually([&] { return lease_holder() == "LEASE-1"; }, "the first lease");
+
+    const auto second = app.good({L"request", L"--chat", L"QUEUE-2", L"--message", L"May I, next?", L"--lease", L"60", L"--detach"});
+    tick();
+    const auto third = app.good({L"request", L"--chat", L"QUEUE-3", L"--message", L"And me?", L"--lease", L"60", L"--detach"});
+    require(second.at("queue").at("position") == 1 && second.at("queue").at("holder") == "LEASE-1" &&
+            second.at("queue").at("expected_wait_seconds").get<int>() > 100, "Wrong place for the second: " + second.dump());
+    require(third.at("queue").at("position") == 2 && third.at("queue").at("expected_wait_seconds").get<int>() > 160,
+            "Wrong place for the third: " + third.dump());
+    app.shows(L"Agents: QUEUED QUEUE-2 | QUEUED QUEUE-3 | WORKING LEASE-1");
+    for (HWND yes : buttons(app.root, L"YES")) require(!IsWindowEnabled(yes), "A queued row can be approved");
+    require(buttons(app.root, L"NO").size() == 2 && buttons(app.root, L"RELEASE").size() == 1, "The queued rows lost their other answers");
+    passed("a second input request waits in a queue on the panel, and its JSON says its place and wait");
+
+    tick();
+    app.good({L"request", L"--chat", L"ASK-4", L"--kind", L"question", L"--message", L"A question?", L"--detach"});
+    app.shows(L"Agents: WAITING ASK-4 | QUEUED QUEUE-2 | QUEUED QUEUE-3 | WORKING LEASE-1");
+    passed("a question is not queued and goes above the line");
+
+    click(app.root, L"RELEASE");
+    app.shows(L"Agents: WAITING ASK-4 | WAITING QUEUE-2 | QUEUED QUEUE-3 | WORKING LEASE-1");
+    require(lease_holder().empty(), "Release granted the next by itself");
+    passed("release sends only the next in line to the person");
+
+    // Away: the line is granted in turn, and a waiter holds its place through Away.
+    click(app.root, L"AWAY");
+    const auto cancel_next = app.cli({L"cancel", knock::widen(second.at("request").at("id").get<std::string>())});
+    require(cancel_next.code == 0, "Cancel failed");
+    eventually([&] { return lease_holder() == "QUEUE-3"; }, "the away grant, in a lease held by QUEUE-3");
+    const auto granted = app.cli({L"result", knock::widen(third.at("request").at("id").get<std::string>())});
+    require(granted.code == 0 && granted.json.at("request").at("granted_by") == "away", "The away grant was not usable: " + granted.json.dump());
+    auto waiter = std::async(std::launch::async, [&] {
+        return app.cli({L"request", L"--chat", L"LATE-5", L"--message", L"Me too?", L"--lease", L"30", L"--timeout", L"8"});
+    });
+    eventually([&] {
+        return knock::send_command({{"op", "status"}}, false).at("input_queue").size() == 1;
+    }, "the waiter joins the line");
+    require(waiter.wait_for(100ms) == std::future_status::timeout, "A queued request returned because of Away");
+    const auto released = app.cli({L"release", knock::widen(third.at("request").at("id").get<std::string>())});
+    require(released.code == 0, "Release failed");
+    const auto late = waiter.get();
+    require(late.code == 0 && late.json.at("request").at("status") == "approved" && late.json.at("request").at("granted_by") == "away",
+            "The blocked request was not granted when its turn came: " + late.json.dump());
+    app.good({L"release", knock::widen(late.json.at("request").at("id").get<std::string>())});
+    passed("away grants the line in turn; a blocked agent is woken without polling");
+    click(app.root, L"AT PC");
+    const auto keep_lease = app.good({L"request", L"--chat", L"KEEP-6", L"--message", L"At PC again", L"--detach"});
+    require(keep_lease.at("request").at("status") == "pending", "At PC granted a request");
+    app.good({L"cancel", knock::widen(keep_lease.at("request").at("id").get<std::string>())});
+}
+
+void quiet_windows_on_the_panel() {
+    App app;
+    const auto closed = app.raw_cli({L"info"});
+    require(closed.first == 0 && closed.second.find("Agents checked in: none.") != std::string::npos &&
+            closed.second.find("Quiet window: none open.") != std::string::npos, "info did not report an empty PC");
+    app.good({L"start", L"--chat", L"OTHER-1", L"--title", L"Another job on this PC"});
+    const auto first = app.good({L"quiet", L"--chat", L"RUN-1", L"--minutes", L"5", L"--reason", L"Timing the startup"});
+    require(first.at("quiet").at("status") == "open" && first.at("quiet_window").at("chat") == "RUN-1", "Wrong window: " + first.dump());
+    app.shows(L"Agents: WORKING OTHER-1 | QUIET WINDOW RUN-1");
+    require(buttons(app.root, L"END QUIET").size() == 1, "The panel cannot end the window");
+    everything_fits(app.root, app.list, "with a quiet window");
+
+    const auto listed = app.raw_cli({L"info"});
+    require(listed.first == 0 && listed.second.find("- OTHER-1: Another job on this PC (started ") != std::string::npos &&
+            listed.second.find("Quiet window: RUN-1 until ") != std::string::npos &&
+            listed.second.find("Timing the startup") != std::string::npos, "info does not name the window and the agents: " + listed.second);
+    const auto asked = app.good({L"request", L"--chat", L"ASK-1", L"--kind", L"question", L"--message", L"Is it open?", L"--detach"});
+    require(asked.at("quiet_window").at("open") == true && asked.at("quiet_window").at("chat") == "RUN-1", "A request's JSON does not say a window is open");
+    app.good({L"cancel", knock::widen(asked.at("request").at("id").get<std::string>())});
+    passed("knock quiet opens a window; info, the panel and every request's JSON name it");
+
+    const auto second = app.good({L"quiet", L"--chat", L"RUN-2", L"--minutes", L"1", L"--reason", L"The second run", L"--detach"});
+    require(second.at("quiet").at("status") == "waiting" && second.at("queue").at("position") == 1 && second.at("queue").at("holder") == "RUN-1",
+            "The second did not wait: " + second.dump());
+    const auto status = app.good({L"quiet", L"--status"});
+    require(status.at("waiting").size() == 1 && status.at("waiting")[0].at("chat") == "RUN-2", "--status does not list the line");
+    // The same command, blocking, picks up its place; a release lets it through.
+    auto waiter = std::async(std::launch::async, [&] {
+        return app.cli({L"quiet", L"--chat", L"RUN-2", L"--minutes", L"1", L"--reason", L"The second run", L"--timeout", L"8"});
+    });
+    require(waiter.wait_for(200ms) == std::future_status::timeout, "The second window did not block");
+    const auto released = app.good({L"quiet", L"--release", L"--chat", L"RUN-1"});
+    require(released.at("quiet").at("end_reason") == "released", "Wrong release");
+    const auto opened = waiter.get();
+    require(opened.code == 0 && opened.json.at("quiet").at("status") == "open" && opened.json.at("quiet").at("chat") == "RUN-2",
+            "The waiter did not get its window: " + opened.json.dump());
+    app.shows(L"Agents: WORKING ASK-1 | WORKING OTHER-1 | QUIET WINDOW RUN-2");
+    passed("a second window waits like a lease and opens when the first is released");
+
+    // The third times out in its place; the person can end what is open.
+    const auto third = app.cli({L"quiet", L"--chat", L"RUN-3", L"--minutes", L"1", L"--reason", L"Too late", L"--timeout", L"1"});
+    require(third.code == 4 && third.json.at("quiet").at("end_reason") == "timed_out", "Wrong exit for a window that gave up: " + third.json.dump());
+    click(app.root, L"END QUIET");
+    eventually([&] { return buttons(app.root, L"END QUIET").empty(); }, "END QUIET ends the window");
+    app.shows(L"Agents: WORKING ASK-1 | WORKING OTHER-1");
+    require(app.good({L"quiet", L"--status"}).at("quiet_window").at("open") == false, "The window stayed open");
+    passed("a waiter that gives up exits 4; the panel can end a window");
+}
 }
 
 int main() {
@@ -290,6 +408,8 @@ int main() {
                 knock::send_command({{"op", "status"}}, false).at("lease").is_null(), "A check-in changed a request or granted input");
         passed("bad arguments fail cleanly; only the GUI answers requests, and a check-in grants nothing");
         }
+        input_queue_on_the_panel();
+        quiet_windows_on_the_panel();
         // The window at each scale it can draw at without changing the display.
         for (const auto* dpi : {L"96", L"120", L"144", L"192"})
             for (const bool small : {false, true}) fits_at(dpi, small);

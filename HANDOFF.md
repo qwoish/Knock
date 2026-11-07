@@ -6,7 +6,7 @@ Knock is a compact Windows tray app with a terminal-style interface. Native Win3
 
 ## Implementation
 
-Version 0.8.0 is a portable Windows x64 application. Keep `KnockTray.exe`,
+Version 0.9.0 is a portable Windows x64 application. Keep `KnockTray.exe`,
 `knock.exe`, and the `assets` directory together. There is no web runtime,
 server account, or network listener.
 
@@ -43,15 +43,17 @@ is required. Saved data remains under `%LOCALAPPDATA%\Knock`.
   Enter, leaving the box, hiding and a 1.5 s pause after typing save a changed
   message when a state is set. Incoming events never replace a message being
   typed. The initial state is unknown until set. Presence survives restart
-  and changes only through trusted GUI calls. It is independent of input
-  leases and notification preferences.
+  and changes only through trusted GUI calls. It is independent of notification
+  preferences; for input leases see the away rule below.
 - `knock presence` reads availability. Status and request create/result/wait
   responses include it. Ordinary `knock request` passes stop_when_unavailable
   to the condition-variable wait: Away/Busy returns pending, exit 7, with
   wait_reason=presence and the same request ID. This also wakes an existing
   implicit wait. Explicit `result --wait` keeps its chosen waiting budget.
-  Resolved decisions take precedence; presence never approves, denies, changes
-  expiry, or resumes a chat. Unset/At PC retain the normal wait behavior.
+  Resolved decisions take precedence; apart from the away rule below, presence never
+  approves, denies, changes expiry, or resumes a chat. A request in line for the lease
+  keeps waiting through Away, since its turn will be granted. Unset/At PC retain the
+  normal wait behavior.
 - A persisted quiet deadline suppresses banners for 15/30/60 minutes without
   resolving requests or extending expiry. The app clears the deadline and sends
   one inbox summary when the timer ends. Right-click or the tray menu controls
@@ -75,6 +77,22 @@ is required. Saved data remains under `%LOCALAPPDATA%\Knock`.
 - Input approvals are exclusive, time-limited cooperative leases. Release,
   timeout, and restart revoke permission. Blocking CLI waits use a condition
   variable, so the model does not need to poll.
+- The line for the lease is the pending input requests in array order, so there is
+  nothing extra to store or keep in step. `queued: true` marks one that arrived behind a
+  lease or an away grant: it gets no banner and no YES until `advance_input_line` moves
+  it up, when a lease ends or the request ahead leaves. Two requests that arrive with
+  the lease free both stay in front of the person, as they did in 0.8.0. `queue` in the
+  response is worked out by `input_queue_place` and is never stored.
+- The away rule is the owner's (26 Oct): `away_grants_input` reads presence, and a
+  message that looks like a refusal leaves the request with the person. It grants only
+  on an arrival or a lease ending, never on a presence change or a restart. Rule of
+  thumb: fail towards asking.
+- Quiet windows are `quiet_windows` in the state, optional like `agents`, and never
+  written just because a file was opened. They are announcements only: nothing refuses
+  work because of one. They survive a restart; an input lease does not. In the interface
+  they are QUIET WINDOW, kept apart from the notification Quiet timer (`busy_until`).
+- `knock info` calls `status` with start_app false, so it never opens the tray. Text
+  other agents wrote is printed there, marked as information rather than instructions.
 - Detached workers run explicit argument arrays, capture output, retain exit
   codes, and persist completion records before notifying the tray. They survive
   tray exit. Completion messages can be copied into the relevant AI chat.
@@ -125,7 +143,8 @@ is required. Saved data remains under `%LOCALAPPDATA%\Knock`.
   remain in settings.json. Only trusted UI calls can change inbox preferences or
   permanently purge Trash. Settings → More contains the additional preferences.
 - `knock info` and `knock get-info` print the agent guide without opening the
-  tray or reading saved data. CMake embeds docs/AGENT_INSTRUCTIONS.md as the one
+  tray, then what a running Knock says about who is on the PC now. CMake embeds
+  docs/AGENT_INSTRUCTIONS.md as the one
   source for the CLI text. `help` and `info` produce plain text; other commands
   keep their JSON contract. The guide explains single waits, detached jobs,
   retaining IDs and bounded output; it makes no automatic CLI-resume claim.

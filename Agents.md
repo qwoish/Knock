@@ -4,6 +4,6 @@ Knock is a small native Windows tray inbox for agent requests, background comman
 
 Use readable C++20 and Win32. Keep GUI, storage, IPC, and command execution separate. Make meaningful local commits as coherent work lands. Keep HANDOFF.md and docs/FEATURES.md current. Never report a Windows desktop test when only a cross-build or Wine test ran.
 
-Only the GUI may approve or deny requests. Custom text, expiry, disconnection, shutdown, and errors must never be treated as approval. Input permissions are cooperative time-limited leases, not an OS security boundary. Do not pass agent text to a shell implicitly.
+Only the GUI may approve or deny requests. The one exception is the owner's away rule: while presence is Away and its message does not withhold input, the store grants the next input request in line. Custom text, expiry, disconnection, shutdown, and errors must never be treated as approval. Input permissions are cooperative time-limited leases, not an OS security boundary. Do not pass agent text to a shell implicitly.
 
 Verify persistence, concurrent decisions, Unicode, argument quoting, and request timeout behavior. Inspect real rendered UI for clipping, hover bounds, scroll behavior, and DPI handling. Keep unneeded tests and dependencies out.

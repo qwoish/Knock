@@ -1,5 +1,9 @@
-# Feature tracker — version 0.8.0
+# Feature tracker — version 0.9.0
 
+- [x] One input lease at a time; later input requests queue in order, shown as QUEUED; JSON gives place and expected wait
+- [x] The turn goes to the person when a lease ends, or is granted while Away unless the message withholds input
+- [x] `knock quiet` windows: one at a time, a second waits, ends by release or time, shown on the panel, named in all agent JSON
+- [x] `knock info` ends with the agents checked in now, the lease holder and any quiet window; `status` has them as JSON
 - [x] Windows tray lifecycle and a top-of-screen bar with no taskbar icon flags
 - [x] Window layout: status strip, agents list, tasks column, notes column with search
 - [x] `knock start` check-in and one-line `knock update`; a job that never checked in still appears

@@ -28,7 +28,7 @@ The ZIP includes the ready-built app and CLI. Extract the whole thing and run
 ![Knock's window: your status along the top, then agents, tasks and notes](docs/screenshots/agents-100.png)
 
 <details>
-<summary>The Done section, 125% and 150% scaling, and the notes tucked away</summary>
+<summary>The Done section, 125% and 150% scaling, the notes tucked away, and agents waiting in line</summary>
 
 ![The Done section open, with its newest job first](docs/screenshots/agents-done-open.png)
 
@@ -37,6 +37,8 @@ The ZIP includes the ready-built app and CLI. Extract the whole thing and run
 ![The window at 150% scaling](docs/screenshots/agents-150.png)
 
 ![The notes column tucked away with the arrow](docs/screenshots/agents-notes-collapsed.png)
+
+![Two requests queued behind a mouse lease, and a quiet window above the list](docs/screenshots/agents-queue-quiet.png)
 
 </details>
 
@@ -54,12 +56,15 @@ bar along the top of the screen, centred:
 
 - **Your status** runs along the top: At PC, Away or Busy, with an optional message.
   Short confirmations appear beside it. If an agent has the mouse, you'll see who
-  and for how long, with **RELEASE** next to it. **SETTINGS** is at the far right.
+  and for how long, with **RELEASE** next to it, and **+2** if two more are in line.
+  **SETTINGS** is at the far right.
 - **Agents** fills the first column, one row per chat label, each with its own little
   pixel character. Agents waiting for you come first with **YES**, **CUSTOM** and
-  **NO**, then working ones, newest at the top. The rows don't move around while
-  work goes on. Click a row that says **read all** to read it in full. **×** clears
-  a row.
+  **NO**, then any **QUEUED** behind the current mouse lease, then working ones, newest
+  at the top. The rows don't move around while work goes on. Click a row that says
+  **read all** to read it in full. **×** clears a row. While an agent is timing
+  something, a **QUIET WINDOW** line sits above the list with who, why and until when,
+  and **END QUIET**.
 - **Done (3)** stays under the list. It opens the finished jobs, newest first; each
   has **COPY REPORT**, which says **COPIED** for a moment.
 - **Tasks**, beside that. Click a task to edit it; type in **New task...** and press
@@ -104,12 +109,17 @@ for coffee” or “In a meeting; headless tests are fine” is enough. **Status
 in the right-click or tray menu jumps to the message box. Until you pick one,
 agents see no status.
 
-Agents get the status with their requests. While Away or Busy, a normal request
-that's still pending stays in the inbox but returns immediately with the status
-and message, so the agent can do other work. A pending request already waiting
-does the same when the status changes to Away or Busy. An answer or expiry takes
-precedence. Returning to At PC doesn't answer any requests
-or restart a chat; the usual Yes/No/Custom buttons still decide what happens.
+Agents get the status with their requests. **Away means the mouse and keyboard
+are granted:** Knock gives an agent's request the lease without asking, one agent
+at a time, unless your message withholds it ("no input", "headless tests only", or
+anything pairing a negative with input, mouse, keyboard, desktop or screen). Questions
+still wait for you. While Busy, or Away with input withheld, a normal request that's
+still pending stays in the inbox but returns immediately with the status and
+message, so the agent can do other work. A pending request already waiting does the
+same when the status changes to Away or Busy, and going Away doesn't approve what's
+already waiting for you. An answer or expiry takes precedence. Returning to At PC
+doesn't answer any requests or restart a chat; the usual Yes/No/Custom buttons still
+decide what happens.
 
 This is a manual setting. It survives restarting Knock and stays as set until
 you change it. It doesn't guess from mouse activity. The quiet timer is
@@ -171,10 +181,11 @@ Give your agents the path to `knock.exe` and tell them to run:
 ```
 
 That returns the usage guide, including how to wait without repeated model
-polling, reuse IDs, and keep tool output small. It works without opening the
-tray or reading your saved data. `get-info` is an alias. The same guide is in
-[AGENT_INSTRUCTIONS.md](docs/AGENT_INSTRUCTIONS.md), beside the executables in
-the portable package.
+polling, reuse IDs, and keep tool output small, and ends with who else is on the
+machine right now: the agents checked in, who has the mouse and keyboard, and any
+quiet window. It works without opening the tray. `get-info` is an alias. The same
+guide is in [AGENT_INSTRUCTIONS.md](docs/AGENT_INSTRUCTIONS.md), beside the
+executables in the portable package.
 
 The one line to add to an agent's start-up is:
 
@@ -203,6 +214,24 @@ the status is Away or Busy. Agents can also read the status with
 `knock.exe presence`. They release the input lease with
 `knock.exe release REQUEST_ID` when they're done.
 
+Only one agent gets the mouse and keyboard at a time. If another request comes in
+while an agent has them, it waits in line: it shows as **QUEUED** on the panel without
+interrupting you, and the agent's JSON says its place and the expected wait. When the
+lease is released or runs out, the next one comes to you as usual, or is granted if
+you're Away. Questions never wait in line.
+
+When an agent is about to time something, it can ask the others to hold off:
+
+```powershell
+.\knock.exe quiet --chat AUDIO-1 --minutes 10 --reason "Timing the mixer startup"
+```
+
+Every other agent then sees who is timing what and until when, in every request's
+JSON, in `knock.exe quiet --status` and in `knock.exe info`, so it can put off builds
+and big searches. It ends with `knock.exe quiet --release` or when the time runs out.
+One runs at a time, and a second waits its turn. It's an announcement between agents:
+it doesn't stop anything, and it has nothing to do with the notification quiet timer.
+
 For a build you want to leave running:
 
 ```powershell
@@ -228,7 +257,7 @@ report, it uses the one from `knock start`.
 
 This is a cooperative permission system: agents have to follow the answer.
 It doesn't lock input at the OS level. A custom reply, timeout, or error never
-counts as permission to use the mouse.
+counts as permission to use the mouse, and only you or your Away status can grant it.
 
 ## A few details
 

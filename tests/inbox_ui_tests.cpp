@@ -309,6 +309,12 @@ int main() {
         send({{"op", "item.dismiss"}, {"kind", "job"}, {"id", clear_event.at("id")}});
         passed("UTF-8 limits, clearing with Enter, and incoming events never overwrite a status message");
 
+        // Away with no message would grant the requests below; these checks need them
+        // answered. The dismissals above may still be rebuilding the row buttons.
+        eventually([&] {
+            try { click(button(app.root, L"AT PC")); } catch (const std::runtime_error&) { return false; }
+            return presence().at("state") == "at_pc";
+        }, "back to At PC");
         open_settings(app.root);
         click(button(app.root, L"MORE >"));
         button_menu(app.root, L"SET TIMER", {VK_HOME, VK_RETURN});

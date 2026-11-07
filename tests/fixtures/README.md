@@ -5,3 +5,6 @@
 that commit's `src/store.cpp`). It holds sample records only. Pending requests and
 the Trash entry were then given far-future dates so the file loads the same way
 for decades. `tests/store_tests.cpp` checks that it opens unchanged and loses nothing.
+
+`state-0.8.0.json` is the same, written by the store at commit 976ffb0, the source of
+the 0.8.0 build (`generate_state_0_8_0.cpp`), and also holds check-ins.

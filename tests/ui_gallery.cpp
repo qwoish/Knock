@@ -257,8 +257,23 @@ void gallery() {
     click(L"YES");
     std::this_thread::sleep_for(400ms);
     shot(L"20-away-with-lease");
+
+    // The line for the mouse and keyboard, and a timed run announced to everyone.
+    click(L"AT PC");
+    send({{"op", "request.create"}, {"chat", "UI-TESTS"}, {"timeout_seconds", 1800}, {"lease_seconds", 600},
+          {"message", "May I use the mouse and keyboard for the window tests? About 8 minutes."}});
+    send({{"op", "request.create"}, {"chat", "SOUND-8"}, {"timeout_seconds", 1800}, {"lease_seconds", 300},
+          {"message", "May I use the mouse and keyboard for the mixer drag tests? About 4 minutes."}});
+    send({{"op", "quiet.open"}, {"chat", "CURRENT-11"}, {"minutes", 15}, {"reason", "Timing Current's startup on the slow disk"}});
+    send({{"op", "quiet.open"}, {"chat", "RENDER-3"}, {"minutes", 5}, {"reason", "Timing a frame"}, {"timeout_seconds", 3000}});
+    shot(L"26-input-queue-and-quiet-window");
     click_if(L"RELEASE");
+    shot(L"27-next-in-line");
+    click_if(L"END QUIET");
     settle();
+    click_if(L"END QUIET");
+    settle();
+    while (HWND no = find_caption(L"NO")) { SendMessageW(no, BM_CLICK, 0, 0); settle(); }
 
     // The awkward cases: a long name, a long message, a non-Latin name, and a row read in full.
     send({{"op", "request.create"}, {"chat", "A-VERY-LONG-JOB-NAME-THAT-KEEPS-GOING-AND-GOING-AND-GOING-123456"}, {"timeout_seconds", 600},
